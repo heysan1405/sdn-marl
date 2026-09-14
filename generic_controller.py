@@ -82,7 +82,30 @@ class GenericSDNController(app_manager.RyuApp):
         Allows external RL Agent (Congestion Agent) to dynamically set
         custom routing penalty weights on specific links.
         """
-        self.custom_link_weights = weights if weights is not None else {}
+        new_weights = weights if weights is not None else {}
+        if new_weights != self.custom_link_weights:
+            self.custom_link_weights = new_weights
+            self.flush_flow_rules()
+
+    def flush_flow_rules(self):
+        """
+        Flushes active forwarding rules (priority=10) on all datapaths so switches
+        immediately request new paths using updated RL link weights.
+        """
+        for dp in list(self.datapaths.values()):
+            try:
+                parser = dp.ofproto_parser
+                ofproto = dp.ofproto
+                mod = parser.OFPFlowMod(
+                    datapath=dp,
+                    command=ofproto.OFPFC_DELETE,
+                    out_port=ofproto.OFPP_ANY,
+                    out_group=ofproto.OFPG_ANY,
+                    priority=10
+                )
+                dp.send_msg(mod)
+            except Exception:
+                pass
 
 
     def _load_static_gml(self, gml_name):

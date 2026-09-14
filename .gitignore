@@ -10,8 +10,10 @@ venv/
 ENV/
 .pyenv/
 
-# Logs & Temporary Files
+# Logs, Models & Temporary Files
 *.log
+*.pt
+*.npy
 /tmp/
 
 # OS / IDE

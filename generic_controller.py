@@ -55,6 +55,9 @@ class GenericSDNController(app_manager.RyuApp):
         self.mac_to_location = {}
         self.ip_to_location = {}
 
+        # Custom Link Penalty Weights set by RL Congestion Agent
+        self.custom_link_weights = {}
+
         # Static / Hybrid Graph Initialization if TOPOLOGY_GML environment variable is provided
         self.static_graph = None
         self.nodes_list = []
@@ -73,6 +76,14 @@ class GenericSDNController(app_manager.RyuApp):
         else:
             print("    Mode: Pure Dynamic LLDP Topology Discovery   ")
         print("==================================================\n")
+
+    def update_link_weights(self, weights):
+        """
+        Allows external RL Agent (Congestion Agent) to dynamically set
+        custom routing penalty weights on specific links.
+        """
+        self.custom_link_weights = weights if weights is not None else {}
+
 
     def _load_static_gml(self, gml_name):
         zoo_dir = os.path.join(os.path.dirname(__file__), "InternetTopologyZoo/gml")
@@ -199,10 +210,15 @@ class GenericSDNController(app_manager.RyuApp):
             graph.add_node(switch.dp.id)
 
         for link in links:
+            link_key = f"s{link.src.dpid}_p{link.src.port_no}->s{link.dst.dpid}_p{link.dst.port_no}"
+            alt_key = f"s{link.src.dpid}->s{link.dst.dpid}"
+            weight = float(self.custom_link_weights.get(link_key, self.custom_link_weights.get(alt_key, 1.0)))
+
             graph.add_edge(
                 link.src.dpid,
                 link.dst.dpid,
-                port=link.src.port_no
+                port=link.src.port_no,
+                weight=weight
             )
 
         return graph
@@ -213,7 +229,7 @@ class GenericSDNController(app_manager.RyuApp):
 
         if current_switch in graph and destination_switch in graph:
             try:
-                path = nx.shortest_path(graph, current_switch, destination_switch)
+                path = nx.shortest_path(graph, current_switch, destination_switch, weight="weight")
                 if len(path) > 1:
                     next_switch = path[1]
                     return graph[current_switch][next_switch]["port"]

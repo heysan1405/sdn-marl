@@ -47,12 +47,19 @@ class SDNCongestionEnv:
             self.action_dim = self._num_links + 1
 
     def get_state_vector(self):
-        if self.controller is None:
-            # Fallback zero state for initialization
-            dim = (self._num_links * 2) + 2 if self._num_links > 0 else 10
-            return np.zeros(dim, dtype=np.float32)
+        state_dict = {}
+        if self.controller is not None:
+            state_dict = self.controller.get_network_state()
+        else:
+            # File IPC: Read live state from active controller
+            import json, os
+            if os.path.exists("/tmp/sdn_network_state.json"):
+                try:
+                    with open("/tmp/sdn_network_state.json", "r") as f:
+                        state_dict = json.load(f)
+                except Exception:
+                    pass
 
-        state_dict = self.controller.get_network_state()
         self._update_link_keys(state_dict)
 
         links_dict = state_dict.get("links", {})
@@ -73,6 +80,11 @@ class SDNCongestionEnv:
         max_u = np.max(utils_arr) if len(utils_arr) > 0 else 0.0
         mean_u = np.mean(utils_arr) if len(utils_arr) > 0 else 0.0
 
+        if len(utils_arr) == 0:
+            # Default zero state if state dict is empty
+            dim = (self._num_links * 2) + 2 if self._num_links > 0 else 58
+            return np.zeros(dim, dtype=np.float32)
+
         state_vector = np.concatenate([
             utils_arr,
             losses_arr,
@@ -86,18 +98,22 @@ class SDNCongestionEnv:
         Executes action, updates controller link weights, waits for sampling window,
         and computes reward & next state.
         """
+        weights = {}
+        if action > 0 and (action - 1) < len(self.link_keys):
+            congested_link_key = self.link_keys[action - 1]
+            weights[congested_link_key] = 10.0
+
         if self.controller is not None:
-            weights = {}
-            if action > 0 and (action - 1) < len(self.link_keys):
-                congested_link_key = self.link_keys[action - 1]
-                # Format: "s1_p1->s2_p2" or "(dpid_src, dpid_dst)"
-                # Set heavy weight multiplier on selected congested link
-                weights[congested_link_key] = 10.0
-
-            # Update controller link weights
             self.controller.update_link_weights(weights)
+        else:
+            # File IPC: Push chosen weights to controller via JSON file
+            import json
+            try:
+                with open("/tmp/sdn_link_weights.json", "w") as f:
+                    json.dump(weights, f)
+            except Exception:
+                pass
 
-        # Wait for environment to observe effects of rerouting
         time.sleep(self.sampling_interval)
 
         next_state = self.get_state_vector()

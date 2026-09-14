@@ -28,7 +28,10 @@ def load_gml_topology(gml_identifier):
     return filepath, graph
 
 
-def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653):
+from mininet.cli import CLI
+
+
+def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653, interactive=False, keep_alive=False):
     setLogLevel("info")
 
     filepath, graph = load_gml_topology(gml_identifier)
@@ -111,6 +114,17 @@ def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653):
     print(iperf_out)
     h2.cmd("killall iperf 2>/dev/null")
 
+    if interactive:
+        print("\n[Entering Mininet Interactive CLI... Type 'exit' to stop]")
+        CLI(net)
+    elif keep_alive:
+        print("\n[Network Keep-Alive Active] Press Ctrl+C to stop network...")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
     print("\nStopping network...")
     net.stop()
     print(f"=== TEST FOR {name} COMPLETE ===")
@@ -119,6 +133,8 @@ def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal SDN Topology Test Runner")
     parser.add_argument("--gml", type=str, required=True, help="Topology name (e.g. Abilene, UsCarrier, Dfn) or path to .gml file")
+    parser.add_argument("--cli", action="store_true", help="Drop into interactive Mininet CLI after starting")
+    parser.add_argument("--keep-alive", action="store_true", help="Keep network running continuously for live agent monitoring")
     args = parser.parse_args()
 
-    run_test(args.gml)
+    run_test(args.gml, interactive=args.cli, keep_alive=args.keep_alive)

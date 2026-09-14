@@ -142,9 +142,28 @@ class GenericSDNController(app_manager.RyuApp):
     # ==================================================
 
     def _monitor_loop(self):
+        import json
         while True:
             for dp in list(self.datapaths.values()):
                 self._request_stats(dp)
+
+            # File IPC: Expose live state to external agents
+            try:
+                state_data = self.get_network_state()
+                with open("/tmp/sdn_network_state.json", "w") as f:
+                    json.dump(state_data, f)
+            except Exception as e:
+                pass
+
+            # File IPC: Read external link weight actions from agents
+            try:
+                if os.path.exists("/tmp/sdn_link_weights.json"):
+                    with open("/tmp/sdn_link_weights.json", "r") as f:
+                        weights = json.load(f)
+                        self.custom_link_weights = weights
+            except Exception as e:
+                pass
+
             hub.sleep(2)
 
     def _request_stats(self, datapath):

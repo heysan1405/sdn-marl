@@ -31,7 +31,7 @@ def load_gml_topology(gml_identifier):
 from mininet.cli import CLI
 
 
-def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653, interactive=False, keep_alive=False):
+def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653, interactive=False, keep_alive=False, traffic=False):
     setLogLevel("info")
 
     filepath, graph = load_gml_topology(gml_identifier)
@@ -112,19 +112,24 @@ def run_test(gml_identifier, controller_ip="127.0.0.1", controller_port=6653, in
     time.sleep(1)
     iperf_out = h1.cmd("iperf -c 10.0.0.2 -t 5")
     print(iperf_out)
-    h2.cmd("killall iperf 2>/dev/null")
+
+    if traffic:
+        print("\n[Continuous Bottleneck Traffic Stream Injected: 85 Mbps h1 -> h2]")
+        h1.cmd("iperf -c 10.0.0.2 -t 3600 -b 85M > /dev/null 2>&1 &")
 
     if interactive:
         print("\n[Entering Mininet Interactive CLI... Type 'exit' to stop]")
         CLI(net)
     elif keep_alive:
-        print("\n[Network Keep-Alive Active] Press Ctrl+C to stop network...")
+        print("\n[Network Keep-Alive Active] Continuous traffic running... Press Ctrl+C to stop network.")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
 
+    h2.cmd("killall iperf 2>/dev/null")
+    h1.cmd("killall iperf 2>/dev/null")
     print("\nStopping network...")
     net.stop()
     print(f"=== TEST FOR {name} COMPLETE ===")
@@ -135,6 +140,7 @@ if __name__ == "__main__":
     parser.add_argument("--gml", type=str, required=True, help="Topology name (e.g. Abilene, UsCarrier, Dfn) or path to .gml file")
     parser.add_argument("--cli", action="store_true", help="Drop into interactive Mininet CLI after starting")
     parser.add_argument("--keep-alive", action="store_true", help="Keep network running continuously for live agent monitoring")
+    parser.add_argument("--traffic", action="store_true", help="Generate continuous background traffic stream during keep-alive")
     args = parser.parse_args()
 
-    run_test(args.gml, interactive=args.cli, keep_alive=args.keep_alive)
+    run_test(args.gml, interactive=args.cli, keep_alive=args.keep_alive, traffic=args.traffic)

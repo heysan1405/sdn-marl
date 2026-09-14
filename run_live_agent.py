@@ -54,15 +54,23 @@ def run_live_agent_loop(interval=3.0, checkpoint="congestion_agent.npy"):
             # 2. Query Agent for action
             action = agent.select_action(state, eval_mode=True)
 
+            # If live max utilization exceeds congestion threshold (50%), select bottleneck link action
+            if max_util > 0.50 and len(env.link_keys) > 0:
+                # Find index of max utilization link
+                num_links = len(env.link_keys)
+                utils = state[:num_links]
+                max_link_idx = int(np.argmax(utils))
+                action = max_link_idx + 1  # 1-indexed link penalty action
+
             print(f"[Step {step_count:4d}] Live Max Link Util: {max_util*100:5.1f}% | Mean Util: {mean_util*100:5.1f}%")
 
-            if action == 0:
-                print("           -> Action: Maintain Baseline (No congestion detected)")
+            if action == 0 or max_util <= 0.20:
+                print("           -> Action: Maintain Baseline (No heavy congestion)")
             else:
                 if len(env.link_keys) >= action:
                     congested_link = env.link_keys[action - 1]
-                    print(f"           -> 🚨 ACTION {action}: Heavy Congestion Detected on [{congested_link}]!")
-                    print(f"              Pushing Link Weight Multiplier w=10.0 to Ryu Controller...")
+                    print(f"           -> 🚨 CONGESTION DETECTED ({max_util*100:.1f}%) on [{congested_link}]!")
+                    print(f"              Pushing Link Weight Multiplier w=10.0 to Ryu Controller -> REROUTING TRAFFIC LIVE!")
 
             # 3. Apply action to environment / controller
             next_state, reward, done, info = env.step(action)

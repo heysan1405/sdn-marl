@@ -177,3 +177,14 @@ class DQNAgent:
         else:
             np.save(path.replace(".pt", ".npy"), self.q_table)
             print(f"[DQN] NumPy Q-Table saved to {path.replace('.pt', '.npy')}")
+
+    def load(self, path):
+        if self.use_torch:
+            self.q_network.load_state_dict(torch.load(path, map_location=self.device))
+            self.target_network.load_state_dict(self.q_network.state_dict())
+            print(f"[DQN] PyTorch model loaded from {path}")
+        else:
+            npy_path = path.replace(".pt", ".npy") if path.endswith(".pt") else path
+            if os.path.exists(npy_path):
+                self.q_table = np.load(npy_path, allow_pickle=True).item()
+                print(f"[DQN] NumPy Q-Table loaded from {npy_path}")

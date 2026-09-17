@@ -109,11 +109,12 @@ FAILURE_MODEL = os.path.join(
 # ============================================================
 
 SEEN_TOPOLOGIES = [
-    "Abilene.gml",
+    "Esnet.gml",
 ]
 
 UNSEEN_TOPOLOGIES = [
-    "Geant2012.gml",
+    "Cogentco.gml",
+    "Garr201003.gml",
 ]
 
 

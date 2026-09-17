@@ -55,7 +55,7 @@ TARGET_UPDATE_FREQUENCY = 10
 # Training
 # =========================================================
 
-NUM_EPISODES = 1000
+NUM_EPISODES = 50
 MAX_STEPS_PER_EPISODE = 100
 
 CHECKPOINT_FREQUENCY = 50

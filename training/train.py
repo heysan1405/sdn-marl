@@ -50,7 +50,24 @@ from training.config import (
 # ============================================================
 
 TRAINING_TOPOLOGIES = [
-    "Abilene.gml",
+    "UsCarrier.gml",
+    "Colt.gml",
+    "GtsCe.gml",
+    "TataNld.gml",
+    "Pern.gml",
+    "VtlWavenet2011.gml",
+    "VtlWavenet2008.gml",
+    "RedBestel.gml",
+    "Ulaknet.gml",
+    "Surfnet.gml",
+    "Uunet.gml",
+    "Bellcanada.gml",
+    "Belnet2006.gml",
+    "Belnet2003.gml",
+    "Belnet2004.gml",
+    "Internetmci.gml",
+    "Rediris.gml",
+    "Easynet.gml",
 ]
 
 TOPOLOGY_DIR = os.path.join(

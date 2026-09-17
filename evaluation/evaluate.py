@@ -5,10 +5,13 @@ Methods:
     1. Trained two-agent MARL
     2. Shortest-path baseline
 
-Supports:
+Evaluation includes:
     - seen topology evaluation
     - unseen topology evaluation
     - multiple evaluation episodes
+    - deterministic greedy policy
+    - controlled link-failure scenario
+    - path-change tracking
     - CSV result generation
 """
 
@@ -16,21 +19,19 @@ import csv
 import os
 import random
 
+import networkx as nx
 import numpy as np
 import torch
 
 from agents.congestion_agent import CongestionAgent
 from agents.failure_agent import FailureAgent
 
-from evaluation.baseline import (
-    run_shortest_path_baseline,
-)
-
-from evaluation.metrics import (
-    extract_metrics,
-)
+from evaluation.metrics import extract_metrics
 
 from simulator.environment import SDNEnvironment
+from simulator.network_simulator import NetworkSimulator
+from simulator.topology_loader import TopologyLoader
+from simulator.traffic_generator import TrafficGenerator
 
 from training.config import (
     AGENT_HIDDEN_DIM,
@@ -75,21 +76,22 @@ SEED = 100
 
 
 # ============================================================
+# Failure configuration
+# ============================================================
+
+# Inject one link failure in every evaluation episode.
+#
+# The same deterministic failed link is used by MARL and the
+# shortest-path baseline for the same topology/episode seed.
+INJECT_LINK_FAILURE = True
+
+
+# ============================================================
 # Checkpoint configuration
 # ============================================================
 
-# ------------------------------------------------------------
-# TEMPORARY:
-# The current training results contain episode-50 checkpoints.
-#
-# After training finishes and *_final.pt files exist,
-# change this to:
-#
-#     CHECKPOINT_NAME = "final"
-# ------------------------------------------------------------
-
-CHECKPOINT_NAME = "episode_50"
-
+# Use the models produced after all 1000 training episodes.
+CHECKPOINT_NAME = "final"
 
 CONGESTION_MODEL = os.path.join(
     CHECKPOINT_DIR,
@@ -110,9 +112,6 @@ SEEN_TOPOLOGIES = [
     "Abilene.gml",
 ]
 
-
-# Geant2012.gml exists in the topology directory and was not
-# used in the current training configuration.
 UNSEEN_TOPOLOGIES = [
     "Geant2012.gml",
 ]
@@ -178,61 +177,49 @@ def validate_state(state):
 
     if node_features.dim() != 2:
         raise ValueError(
-            "node_features must be "
-            "2-dimensional."
+            "node_features must be 2-dimensional."
         )
 
     if node_features.shape[1] != 7:
         raise ValueError(
-            "node_features must have shape "
-            "[N, 7]. "
+            "node_features must have shape [N, 7]. "
             f"Got {tuple(node_features.shape)}."
         )
 
     if edge_index.dim() != 2:
         raise ValueError(
-            "edge_index must be "
-            "2-dimensional."
+            "edge_index must be 2-dimensional."
         )
 
     if edge_index.shape[0] != 2:
         raise ValueError(
-            "edge_index must have shape "
-            "[2, E]."
+            "edge_index must have shape [2, E]."
         )
 
     if edge_features.dim() != 2:
         raise ValueError(
-            "edge_features must be "
-            "2-dimensional."
+            "edge_features must be 2-dimensional."
         )
 
     if edge_features.shape[1] != EDGE_FEATURE_DIM:
         raise ValueError(
-            "edge_features must have shape "
-            "[E, 5]. "
+            "edge_features must have shape [E, 5]. "
             f"Got {tuple(edge_features.shape)}."
         )
 
-    if (
-        edge_features.shape[0]
-        != edge_index.shape[1]
-    ):
+    if edge_features.shape[0] != edge_index.shape[1]:
         raise ValueError(
-            "Number of edge features must "
-            "match edge_index."
+            "Number of edge features must match edge_index."
         )
 
     if demand_features.dim() != 2:
         raise ValueError(
-            "demand_features must be "
-            "2-dimensional."
+            "demand_features must be 2-dimensional."
         )
 
     if demand_features.shape != (1, 1):
         raise ValueError(
-            "demand_features must have shape "
-            "[1, 1]. "
+            "demand_features must have shape [1, 1]. "
             f"Got {tuple(demand_features.shape)}."
         )
 
@@ -313,13 +300,15 @@ def create_agents():
 # ============================================================
 
 def load_agents():
-    """Create agents and load trained checkpoints."""
+    """Create agents and load final trained checkpoints."""
 
     print()
     print("Checkpoint configuration:")
+
     print(
         f"  Congestion: {CONGESTION_MODEL}"
     )
+
     print(
         f"  Failure:   {FAILURE_MODEL}"
     )
@@ -367,6 +356,107 @@ def load_agents():
         congestion_agent,
         failure_agent,
     )
+
+
+# ============================================================
+# Failure selection
+# ============================================================
+
+def choose_failed_link(
+    graph,
+    seed,
+):
+    """
+    Select one deterministic healthy link.
+
+    The same topology + seed always produces the same link.
+    """
+
+    edges = list(graph.edges())
+
+    if not edges:
+        return None
+
+    rng = random.Random(seed)
+
+    return edges[
+        rng.randrange(len(edges))
+    ]
+
+
+# ============================================================
+# Inject controlled failure
+# ============================================================
+
+def inject_controlled_failure(
+    env,
+    failed_link,
+):
+    """
+    Inject one link failure into the environment.
+    """
+
+    if not INJECT_LINK_FAILURE:
+        return
+
+    if failed_link is None:
+        return
+
+    u, v = failed_link
+
+    env.inject_link_failure(
+        u,
+        v,
+    )
+
+
+# ============================================================
+# Path helpers
+# ============================================================
+
+def get_active_paths(env):
+    """Return a copy of current simulator paths."""
+
+    simulator = getattr(
+        env,
+        "simulator",
+        None,
+    )
+
+    if simulator is None:
+        return {}
+
+    return {
+        demand_id: list(path)
+        for demand_id, path
+        in simulator.active_paths.items()
+    }
+
+
+def count_path_changes(
+    before_paths,
+    after_paths,
+):
+    """
+    Count demands whose active path changed.
+    """
+
+    demand_ids = (
+        set(before_paths)
+        | set(after_paths)
+    )
+
+    changed = 0
+
+    for demand_id in demand_ids:
+
+        if (
+            before_paths.get(demand_id)
+            != after_paths.get(demand_id)
+        ):
+            changed += 1
+
+    return changed
 
 
 # ============================================================
@@ -420,9 +510,49 @@ def evaluate_marl_topology(
 
             validate_state(state)
 
+            # ----------------------------------------------------
+            # Select the same deterministic failure used by the
+            # baseline evaluation.
+            # ----------------------------------------------------
+
+            failed_link = choose_failed_link(
+                env.graph,
+                seed,
+            )
+
+            inject_controlled_failure(
+                env,
+                failed_link,
+            )
+
+            # Rebuild state after failure injection.
+            state = env._build_state()
+
+            validate_state(state)
+
+            initial_paths = get_active_paths(
+                env
+            )
+
             done = False
+
             steps = 0
+
             total_reward = 0.0
+
+            congestion_action_counts = {
+                0: 0,
+                1: 0,
+                2: 0,
+            }
+
+            failure_action_counts = {
+                0: 0,
+                1: 0,
+                2: 0,
+            }
+
+            total_path_changes = 0
 
             last_info = {}
 
@@ -447,6 +577,18 @@ def evaluate_marl_topology(
                     )
                 )
 
+                congestion_action_counts[
+                    congestion_action
+                ] += 1
+
+                failure_action_counts[
+                    failure_action
+                ] += 1
+
+                before_paths = get_active_paths(
+                    env
+                )
+
                 (
                     next_state,
                     reward,
@@ -455,6 +597,17 @@ def evaluate_marl_topology(
                 ) = env.step(
                     congestion_action,
                     failure_action,
+                )
+
+                after_paths = get_active_paths(
+                    env
+                )
+
+                total_path_changes += (
+                    count_path_changes(
+                        before_paths,
+                        after_paths,
+                    )
                 )
 
                 validate_state(
@@ -477,8 +630,17 @@ def evaluate_marl_topology(
 
                 steps += 1
 
-            # Metrics are returned under
-            # info["metrics"] by SDNEnvironment.
+            final_paths = get_active_paths(
+                env
+            )
+
+            total_final_path_changes = (
+                count_path_changes(
+                    initial_paths,
+                    final_paths,
+                )
+            )
+
             metrics = extract_metrics(
                 last_info.get(
                     "metrics",
@@ -486,13 +648,9 @@ def evaluate_marl_topology(
                 )
             )
 
-            # Fallback to simulator metrics if
-            # the info dictionary did not contain
-            # usable metric values.
             if not metrics_have_values(
                 metrics
             ):
-
                 simulator = getattr(
                     env,
                     "simulator",
@@ -517,17 +675,63 @@ def evaluate_marl_topology(
                     "episode": episode,
                     "steps": steps,
                     "total_reward": total_reward,
+
+                    "failed_link": (
+                        str(failed_link)
+                        if failed_link is not None
+                        else ""
+                    ),
+
+                    "path_changes": (
+                        total_path_changes
+                    ),
+
+                    "final_path_changes": (
+                        total_final_path_changes
+                    ),
+
+                    "congestion_maintain": (
+                        congestion_action_counts[0]
+                    ),
+
+                    "congestion_reroute": (
+                        congestion_action_counts[1]
+                    ),
+
+                    "congestion_rate_limit": (
+                        congestion_action_counts[2]
+                    ),
+
+                    "failure_no_action": (
+                        failure_action_counts[0]
+                    ),
+
+                    "failure_reroute": (
+                        failure_action_counts[1]
+                    ),
+
+                    "failure_isolate": (
+                        failure_action_counts[2]
+                    ),
                 }
             )
 
-            results.append(metrics)
+            results.append(
+                metrics
+            )
 
         finally:
 
-            env.close()
+            # SDNEnvironment currently owns the simulator.
+            # Explicit deletion is sufficient for this evaluation.
+            del env
 
     return results
 
+
+# ============================================================
+# Metrics validation
+# ============================================================
 
 def metrics_have_values(metrics):
     """
@@ -556,14 +760,21 @@ def metrics_have_values(metrics):
 
 
 # ============================================================
-# Baseline evaluation
+# Shortest-path baseline
 # ============================================================
 
 def evaluate_baseline_topology(
     topology_name,
     num_episodes=10,
 ):
-    """Evaluate shortest-path baseline."""
+    """
+    Evaluate shortest-path routing under the same
+    traffic and controlled failure conditions.
+
+    This implementation intentionally uses the same
+    topology, seed, demand generation and failed link
+    as the MARL evaluation.
+    """
 
     topology_path = os.path.join(
         TOPOLOGY_DIR,
@@ -580,6 +791,8 @@ def evaluate_baseline_topology(
 
     results = []
 
+    loader = TopologyLoader()
+
     for episode in range(
         1,
         num_episodes + 1,
@@ -589,29 +802,104 @@ def evaluate_baseline_topology(
 
         set_seed(seed)
 
-        metrics = (
-            run_shortest_path_baseline(
-                topology_path=topology_path,
-                traffic_scenario=TRAFFIC_SCENARIO,
-                num_demands=NUM_DEMANDS,
-                k_paths=K_PATHS,
-                random_seed=seed,
+        graph = loader.load(
+            topology_file=topology_path
+        )
+
+        traffic_generator = (
+            TrafficGenerator(
+                graph=graph,
+                seed=seed,
             )
         )
 
-        metrics["method"] = (
-            "shortest_path"
+        demands = (
+            traffic_generator.generate(
+                scenario=TRAFFIC_SCENARIO,
+                num_demands=NUM_DEMANDS,
+            )
         )
 
-        metrics["topology"] = (
-            topology_name
+        simulator = NetworkSimulator(
+            graph=graph,
+            k_paths=K_PATHS,
+            random_seed=seed,
         )
 
-        metrics["episode"] = (
-            episode
+        simulator.reset()
+
+        # --------------------------------------------------------
+        # Inject exactly the same failure as MARL.
+        # --------------------------------------------------------
+
+        failed_link = choose_failed_link(
+            graph,
+            seed,
         )
 
-        results.append(metrics)
+        if (
+            INJECT_LINK_FAILURE
+            and failed_link is not None
+        ):
+            simulator.fail_link(
+                failed_link[0],
+                failed_link[1],
+            )
+
+        # --------------------------------------------------------
+        # Install demands after the failure so shortest-path
+        # routing automatically avoids the failed link.
+        # --------------------------------------------------------
+
+        simulator.install_demands(
+            demands
+        )
+
+        final_paths = {
+            demand_id: list(path)
+            for demand_id, path
+            in simulator.active_paths.items()
+        }
+
+        metrics = extract_metrics(
+            simulator.calculate_network_metrics()
+        )
+
+        metrics.update(
+            {
+                "method": "shortest_path",
+                "topology": topology_name,
+                "episode": episode,
+                "steps": 1,
+                "total_reward": 0.0,
+
+                "failed_link": (
+                    str(failed_link)
+                    if failed_link is not None
+                    else ""
+                ),
+
+                "path_changes": 0,
+
+                "final_path_changes": 0,
+
+                "congestion_maintain": 0,
+                "congestion_reroute": 0,
+                "congestion_rate_limit": 0,
+
+                "failure_no_action": 0,
+                "failure_reroute": 0,
+                "failure_isolate": 0,
+
+                "active_demands": len(
+                    final_paths
+                ),
+            }
+        )
+
+        results.append(
+            metrics
+        )
 
     return results
 
@@ -642,12 +930,28 @@ def save_results(
         "episode",
         "steps",
         "total_reward",
+
         "max_utilization",
         "average_utilization",
         "delay",
         "packet_loss",
         "throughput",
         "congested_links",
+
+        "failed_link",
+
+        "path_changes",
+        "final_path_changes",
+
+        "congestion_maintain",
+        "congestion_reroute",
+        "congestion_rate_limit",
+
+        "failure_no_action",
+        "failure_reroute",
+        "failure_isolate",
+
+        "active_demands",
     ]
 
     with open(
@@ -666,7 +970,6 @@ def save_results(
         writer.writeheader()
 
         for result in results:
-
             writer.writerow(
                 result
             )
@@ -694,9 +997,9 @@ def summarize_results(results):
         ).append(result)
 
     print()
-    print("=" * 90)
+    print("=" * 100)
     print("EVALUATION SUMMARY")
-    print("=" * 90)
+    print("=" * 100)
 
     for (
         method,
@@ -704,6 +1007,7 @@ def summarize_results(results):
     ), rows in groups.items():
 
         print()
+
         print(
             f"Method:   {method}"
         )
@@ -719,6 +1023,8 @@ def summarize_results(results):
             "packet_loss",
             "throughput",
             "congested_links",
+            "path_changes",
+            "final_path_changes",
         ]
 
         for metric in metrics:
@@ -732,19 +1038,18 @@ def summarize_results(results):
                     None,
                 )
 
-                if value is not None:
+                if value is None:
+                    continue
 
-                    try:
-
-                        values.append(
-                            float(value)
-                        )
-
-                    except (
-                        TypeError,
-                        ValueError,
-                    ):
-                        pass
+                try:
+                    values.append(
+                        float(value)
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    pass
 
             if values:
 
@@ -759,7 +1064,71 @@ def summarize_results(results):
                 )
 
     print()
-    print("=" * 90)
+    print("=" * 100)
+
+
+# ============================================================
+# Action summary
+# ============================================================
+
+def print_action_summary(results):
+    """Print aggregate MARL action counts."""
+
+    marl_results = [
+        row
+        for row in results
+        if row.get("method") == "marl"
+    ]
+
+    if not marl_results:
+        return
+
+    print()
+    print("=" * 100)
+    print("MARL ACTION SUMMARY")
+    print("=" * 100)
+
+    fields = [
+        "congestion_maintain",
+        "congestion_reroute",
+        "congestion_rate_limit",
+        "failure_no_action",
+        "failure_reroute",
+        "failure_isolate",
+    ]
+
+    for field in fields:
+
+        total = sum(
+            float(
+                row.get(
+                    field,
+                    0,
+                )
+            )
+            for row in marl_results
+        )
+
+        print(
+            f"{field:30s}: {total:.0f}"
+        )
+
+    total_path_changes = sum(
+        float(
+            row.get(
+                "path_changes",
+                0,
+            )
+        )
+        for row in marl_results
+    )
+
+    print(
+        f"{'actual path changes':30s}: "
+        f"{total_path_changes:.0f}"
+    )
+
+    print("=" * 100)
 
 
 # ============================================================
@@ -782,9 +1151,9 @@ def main():
 
     all_results = []
 
-    print("=" * 90)
+    print("=" * 100)
     print("SDN-MARL EVALUATION")
-    print("=" * 90)
+    print("=" * 100)
 
     print(
         f"Device: {DEVICE}"
@@ -815,7 +1184,12 @@ def main():
         f"{FAILURE_MODEL}"
     )
 
-    print("=" * 90)
+    print(
+        f"Failure injection: "
+        f"{INJECT_LINK_FAILURE}"
+    )
+
+    print("=" * 100)
 
     # ========================================================
     # Load trained agents
@@ -830,7 +1204,7 @@ def main():
     ) = load_agents()
 
     print(
-        "Trained models loaded successfully."
+        "Trained final models loaded successfully."
     )
 
     # ========================================================
@@ -838,9 +1212,9 @@ def main():
     # ========================================================
 
     print()
-    print("=" * 90)
+    print("=" * 100)
     print("SEEN TOPOLOGY EVALUATION")
-    print("=" * 90)
+    print("=" * 100)
 
     for topology_name in SEEN_TOPOLOGIES:
 
@@ -884,9 +1258,9 @@ def main():
     # ========================================================
 
     print()
-    print("=" * 90)
+    print("=" * 100)
     print("UNSEEN TOPOLOGY EVALUATION")
-    print("=" * 90)
+    print("=" * 100)
 
     for topology_name in UNSEEN_TOPOLOGIES:
 
@@ -973,7 +1347,12 @@ def main():
         all_results
     )
 
+    print_action_summary(
+        all_results
+    )
+
     print()
+
     print(
         f"Results saved to: "
         f"{results_path}"

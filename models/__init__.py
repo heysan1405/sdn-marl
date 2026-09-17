@@ -1,7 +1,13 @@
+"""
+Neural network models for SDN-MARL.
+"""
+
 from .gnn_encoder import GNNEncoder
-from .routing_network import RoutingNetwork
+from .congestion_network import CongestionNetwork
+from .failure_network import FailureNetwork
 
 __all__ = [
     "GNNEncoder",
-    "RoutingNetwork",
+    "CongestionNetwork",
+    "FailureNetwork",
 ]

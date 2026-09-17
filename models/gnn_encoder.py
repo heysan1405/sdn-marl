@@ -1,3 +1,26 @@
+"""
+Graph Neural Network encoder for SDN-MARL.
+
+The encoder converts a variable-sized network graph into a
+fixed-size graph embedding.
+
+Node features:
+    [degree,
+     node_load,
+     normalized_x,
+     normalized_y,
+     is_source,
+     is_destination,
+     is_failed]
+
+Edge features:
+    [utilization,
+     capacity,
+     delay,
+     packet_loss,
+     is_failed]
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,119 +30,90 @@ from torch_geometric.nn import GATConv, global_mean_pool
 
 class GNNEncoder(nn.Module):
     """
-    Edge-aware GAT encoder for topology-aware routing.
+    Edge-aware Graph Attention Network.
 
-    The model supports variable-size network topologies.
+    Supports variable numbers of nodes and edges.
 
-    Inputs
-    ------
-    x:
-        Node features
-        Shape: [num_nodes, node_feature_dim]
+    Input:
+        node_features: [N, node_feature_dim]
+        edge_index:    [2, E]
+        edge_features: [E, edge_feature_dim]
 
-    edge_index:
-        Graph connectivity
-        Shape: [2, num_edges]
-
-    edge_attr:
-        Edge/link features
-        Shape: [num_edges, edge_feature_dim]
-
-    batch:
-        Graph ID for each node.
-        Shape: [num_nodes]
-
-        If None, the input is treated as one graph.
-
-    Output
-    ------
-    graph_embedding:
-        Fixed-size graph representation.
-        Shape: [num_graphs, graph_embedding_dim]
+    Output:
+        graph_embedding: [B, graph_embedding_dim]
     """
 
     def __init__(
         self,
-        node_feature_dim: int,
-        edge_feature_dim: int,
-        hidden_dim: int = 64,
-        graph_embedding_dim: int = 128,
-        num_layers: int = 2,
-        heads: int = 4,
-        dropout: float = 0.1,
+        node_feature_dim=7,
+        edge_feature_dim=5,
+        hidden_dim=64,
+        graph_embedding_dim=128,
+        num_layers=2,
+        heads=4,
+        dropout=0.1,
     ):
         super().__init__()
 
         if node_feature_dim <= 0:
             raise ValueError(
-                "node_feature_dim must be greater than 0"
+                "node_feature_dim must be positive."
             )
 
         if edge_feature_dim <= 0:
             raise ValueError(
-                "edge_feature_dim must be greater than 0"
+                "edge_feature_dim must be positive."
             )
 
         if hidden_dim <= 0:
             raise ValueError(
-                "hidden_dim must be greater than 0"
+                "hidden_dim must be positive."
             )
 
         if graph_embedding_dim <= 0:
             raise ValueError(
-                "graph_embedding_dim must be greater than 0"
+                "graph_embedding_dim must be positive."
             )
 
-        if num_layers < 1:
+        if num_layers <= 0:
             raise ValueError(
-                "num_layers must be at least 1"
+                "num_layers must be positive."
             )
 
-        if heads < 1:
+        if heads <= 0:
             raise ValueError(
-                "heads must be at least 1"
+                "heads must be positive."
             )
 
         self.node_feature_dim = node_feature_dim
         self.edge_feature_dim = edge_feature_dim
-        self.hidden_dim = hidden_dim
         self.graph_embedding_dim = graph_embedding_dim
-        self.num_layers = num_layers
-        self.heads = heads
-        self.dropout = dropout
 
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
 
-        # Keep track of the output dimension of every
-        # intermediate GNN layer.
-        layer_dimensions = []
-
-        # =========================================================
-        # Single-layer GNN
-        # =========================================================
-        if num_layers == 1:
-
-            self.convs.append(
-                GATConv(
-                    in_channels=node_feature_dim,
-                    out_channels=graph_embedding_dim,
-                    heads=heads,
-                    concat=False,
-                    dropout=dropout,
-                    edge_dim=edge_feature_dim,
-                )
+        # First GAT layer
+        self.convs.append(
+            GATConv(
+                in_channels=node_feature_dim,
+                out_channels=hidden_dim,
+                heads=heads,
+                concat=False,
+                dropout=dropout,
+                edge_dim=edge_feature_dim,
             )
+        )
 
-        # =========================================================
-        # Multiple GNN layers
-        # =========================================================
-        else:
+        self.norms.append(
+            nn.LayerNorm(hidden_dim)
+        )
 
-            # First layer
+        # Remaining GAT layers
+        for _ in range(num_layers - 1):
+
             self.convs.append(
                 GATConv(
-                    in_channels=node_feature_dim,
+                    in_channels=hidden_dim,
                     out_channels=hidden_dim,
                     heads=heads,
                     concat=False,
@@ -128,218 +122,130 @@ class GNNEncoder(nn.Module):
                 )
             )
 
-            layer_dimensions.append(hidden_dim)
-
-            # Intermediate layers
-            for _ in range(num_layers - 2):
-
-                self.convs.append(
-                    GATConv(
-                        in_channels=hidden_dim,
-                        out_channels=hidden_dim,
-                        heads=heads,
-                        concat=False,
-                        dropout=dropout,
-                        edge_dim=edge_feature_dim,
-                    )
-                )
-
-                layer_dimensions.append(hidden_dim)
-
-            # Final layer
-            self.convs.append(
-                GATConv(
-                    in_channels=hidden_dim,
-                    out_channels=graph_embedding_dim,
-                    heads=heads,
-                    concat=False,
-                    dropout=dropout,
-                    edge_dim=edge_feature_dim,
-                )
-            )
-
-        # =========================================================
-        # Normalization
-        # =========================================================
-        #
-        # There is exactly one normalization layer for every
-        # GNN layer except the final one.
-        #
-        # Example:
-        #
-        # num_layers = 3
-        #
-        # GNN 1 -> LayerNorm
-        # GNN 2 -> LayerNorm
-        # GNN 3 -> no LayerNorm
-        #
-        for dimension in layer_dimensions:
-
             self.norms.append(
-                nn.LayerNorm(dimension)
+                nn.LayerNorm(hidden_dim)
             )
 
-        # Final graph-embedding normalization.
+        # Convert node embeddings to graph embedding
+        self.output_layer = nn.Linear(
+            hidden_dim,
+            graph_embedding_dim,
+        )
+
         self.output_norm = nn.LayerNorm(
             graph_embedding_dim
         )
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(
         self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor,
-        batch: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        node_features,
+        edge_index,
+        edge_features,
+        batch=None,
+    ):
+        """
+        Encode graph.
 
-        # =========================================================
-        # Validate node features
-        # =========================================================
+        Parameters
+        ----------
+        node_features:
+            Tensor [N, node_feature_dim]
 
-        if x.dim() != 2:
+        edge_index:
+            Tensor [2, E]
+
+        edge_features:
+            Tensor [E, edge_feature_dim]
+
+        batch:
+            Tensor [N] assigning each node to a graph.
+            If None, assumes one graph.
+
+        Returns
+        -------
+        Tensor:
+            [B, graph_embedding_dim]
+        """
+
+        if node_features.dim() != 2:
             raise ValueError(
-                "x must have shape "
-                "[num_nodes, node_feature_dim]"
+                "node_features must have shape [N, F]."
             )
-
-        if x.size(1) != self.node_feature_dim:
-            raise ValueError(
-                f"Expected {self.node_feature_dim} node features, "
-                f"got {x.size(1)}"
-            )
-
-        # =========================================================
-        # Validate edge index
-        # =========================================================
 
         if edge_index.dim() != 2:
             raise ValueError(
-                "edge_index must have shape [2, num_edges]"
+                "edge_index must have shape [2, E]."
             )
 
-        if edge_index.size(0) != 2:
+        if edge_index.shape[0] != 2:
             raise ValueError(
-                "edge_index must have shape [2, num_edges]"
+                "edge_index must have shape [2, E]."
             )
 
-        if edge_index.size(1) == 0:
+        if edge_features.dim() != 2:
             raise ValueError(
-                "The graph must contain at least one edge"
+                "edge_features must have shape [E, F]."
             )
 
-        # =========================================================
-        # Validate edge features
-        # =========================================================
-
-        if edge_attr.dim() != 2:
+        if node_features.shape[1] != self.node_feature_dim:
             raise ValueError(
-                "edge_attr must have shape "
-                "[num_edges, edge_feature_dim]"
+                f"Expected {self.node_feature_dim} node "
+                f"features, got {node_features.shape[1]}."
             )
 
-        if edge_attr.size(0) != edge_index.size(1):
+        if edge_features.shape[1] != self.edge_feature_dim:
             raise ValueError(
-                "Number of edge features must match "
-                "number of edges"
+                f"Expected {self.edge_feature_dim} edge "
+                f"features, got {edge_features.shape[1]}."
             )
 
-        if edge_attr.size(1) != self.edge_feature_dim:
-            raise ValueError(
-                f"Expected {self.edge_feature_dim} edge features, "
-                f"got {edge_attr.size(1)}"
-            )
+        if edge_index.numel() > 0:
 
-        # =========================================================
-        # Validate edge indices
-        # =========================================================
+            if edge_index.min() < 0:
+                raise ValueError(
+                    "edge_index contains negative indices."
+                )
 
-        if edge_index.min() < 0:
-            raise ValueError(
-                "edge_index contains a negative node index"
-            )
-
-        if edge_index.max() >= x.size(0):
-            raise ValueError(
-                "edge_index contains a node index outside "
-                "the range of x"
-            )
-
-        # =========================================================
-        # Batch handling
-        # =========================================================
+            if edge_index.max() >= node_features.shape[0]:
+                raise ValueError(
+                    "edge_index contains invalid node indices."
+                )
 
         if batch is None:
 
-            # Treat input as one graph.
             batch = torch.zeros(
-                x.size(0),
+                node_features.shape[0],
                 dtype=torch.long,
-                device=x.device,
+                device=node_features.device,
             )
 
-        if batch.dim() != 1:
-            raise ValueError(
-                "batch must have shape [num_nodes]"
-            )
+        x = node_features
 
-        if batch.size(0) != x.size(0):
-            raise ValueError(
-                "batch must contain one value per node"
-            )
+        for conv, norm in zip(
+            self.convs,
+            self.norms,
+        ):
 
-        # =========================================================
-        # GAT message passing
-        # =========================================================
-
-        h = x
-
-        for layer_index, conv in enumerate(self.convs):
-
-            h = conv(
-                h,
+            x = conv(
+                x,
                 edge_index,
-                edge_attr,
+                edge_attr=edge_features,
             )
 
-            # All layers except the final layer receive:
-            # normalization -> activation -> dropout
-            if layer_index < len(self.convs) - 1:
+            x = norm(x)
 
-                h = self.norms[layer_index](h)
+            x = F.elu(x)
 
-                h = F.elu(h)
+            x = self.dropout(x)
 
-                h = F.dropout(
-                    h,
-                    p=self.dropout,
-                    training=self.training,
-                )
+        x = self.output_layer(x)
 
-        # =========================================================
-        # Final node representation
-        # =========================================================
-
-        h = self.output_norm(h)
-
-        # =========================================================
-        # Global mean pooling
-        # =========================================================
-        #
-        # Variable number of nodes:
-        #
-        # Graph A -> 11 nodes
-        # Graph B -> 22 nodes
-        # Graph C -> 50 nodes
-        #
-        # All become:
-        #
-        # [1, graph_embedding_dim]
-        #
-        # when processed individually.
-        # =========================================================
+        x = self.output_norm(x)
 
         graph_embedding = global_mean_pool(
-            h,
+            x,
             batch,
         )
 

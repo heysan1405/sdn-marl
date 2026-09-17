@@ -1,29 +1,18 @@
+"""
+Experience replay buffer for DQN agents.
+"""
+
 from collections import deque
 import random
 
 
 class ReplayBuffer:
-    """
-    Experience replay buffer for graph-based DQN.
 
-    Each experience is stored as:
+    def __init__(self, capacity=100_000):
 
-        (
-            state,
-            action,
-            reward,
-            next_state,
-            done
-        )
-
-    States are stored as dictionaries because graph sizes
-    can vary between experiences.
-    """
-
-    def __init__(self, capacity: int = 100_000):
         if capacity <= 0:
             raise ValueError(
-                "capacity must be greater than 0."
+                "capacity must be positive."
             )
 
         self.buffer = deque(
@@ -33,14 +22,11 @@ class ReplayBuffer:
     def add(
         self,
         state,
-        action: int,
-        reward: float,
+        action,
+        reward,
         next_state,
-        done: bool,
+        done,
     ):
-        """
-        Add one experience to the replay buffer.
-        """
 
         self.buffer.append(
             (
@@ -52,26 +38,16 @@ class ReplayBuffer:
             )
         )
 
-    def sample(self, batch_size: int):
-        """
-        Randomly sample experiences.
-
-        Raises:
-            ValueError:
-                If the buffer contains fewer experiences
-                than requested.
-        """
+    def sample(self, batch_size):
 
         if batch_size <= 0:
             raise ValueError(
-                "batch_size must be greater than 0."
+                "batch_size must be positive."
             )
 
         if len(self.buffer) < batch_size:
             raise ValueError(
-                f"Not enough experiences. "
-                f"Current size: {len(self.buffer)}, "
-                f"requested: {batch_size}."
+                "Not enough experiences."
             )
 
         return random.sample(
@@ -83,8 +59,4 @@ class ReplayBuffer:
         return len(self.buffer)
 
     def clear(self):
-        """
-        Remove all experiences.
-        """
-
         self.buffer.clear()

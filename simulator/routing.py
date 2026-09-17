@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import networkx as nx
 
-from simulator.topology_loader import TopologyLoader
+from .topology_loader import TopologyLoader
 
 
 class RoutingEngine:

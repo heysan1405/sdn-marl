@@ -36,9 +36,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
 
-from simulator.topology_loader import TopologyLoader
-from simulator.traffic_generator import TrafficGenerator
-from simulator.routing import RoutingEngine
+from .topology_loader import TopologyLoader
+from .traffic_generator import TrafficGenerator
+from .routing import RoutingEngine
 
 
 class NetworkSimulator:
@@ -1102,85 +1102,286 @@ class NetworkSimulator:
     # ==============================================================
     # REROUTING
     # ==============================================================
-
-    def reroute_demand(
-        self,
-        demand_id: int,
-    ) -> bool:
+    def _path_is_usable(self, path):
         """
-        Reroute one demand using a healthy path.
+        Check whether a path can currently be used.
 
-        Returns True if a new usable path was found.
+        A path is unusable if:
+        - any node in the path has failed
+        - any link in the path has failed
         """
-
-        if demand_id < 0 or demand_id >= len(self.demands):
+        if not path or len(path) < 2:
             return False
 
-        demand = self.demands[demand_id]
+        failed_nodes = set(self.get_failed_nodes())
+        failed_links = set(self.get_failed_links())
 
-        src = demand["src"]
-        dst = demand["dst"]
+        # Failed nodes
+        for node in path:
+            if node in failed_nodes:
+                return False
 
-        old_path = self.active_paths.get(demand_id)
+        # Failed links
+        for u, v in zip(path[:-1], path[1:]):
+            if (u, v) in failed_links or (v, u) in failed_links:
+                return False
 
-        # Find a healthy path.
-        new_path = self.find_path(src, dst)
-
-        if new_path is None:
-            self.active_paths.pop(
-                demand_id,
-                None,
-            )
-            return False
-
-        # If the path is exactly the same, there was no
-        # alternative route.
-        if old_path == new_path:
-
-            # It is still a valid route.
-            self.active_paths[demand_id] = new_path
-
-            return True
-
-        self.active_paths[demand_id] = new_path
+            # Also make sure the edge still exists
+            if not self.graph.has_edge(u, v):
+                return False
 
         return True
 
-    def reroute_all_demands(self) -> int:
+
+    def _remove_demand_traffic(self, demand_id):
         """
-        Attempt to reroute every active demand.
+        Temporarily remove one demand's traffic from the network.
 
-        Returns number of successfully rerouted demands.
+        This is important when selecting a congestion-aware route.
+        Otherwise, the demand's old traffic would artificially increase
+        the utilization of its old path while evaluating alternatives.
         """
+        if demand_id not in self.active_paths:
+            return
 
-        rerouted = 0
+        path = self.active_paths[demand_id]
 
-        for demand_id in range(len(self.demands)):
+        if demand_id >= len(self.demands):
+            return
 
-            old_path = self.active_paths.get(
-                demand_id
+        demand = self.demands[demand_id]
+
+        traffic = float(
+            demand.get(
+                "traffic_mbps",
+                demand.get("traffic", 0.0)
             )
+        )
 
-            new_path = self.find_path(
-                self.demands[demand_id]["src"],
-                self.demands[demand_id]["dst"],
+        if traffic <= 0:
+            return
+
+        for u, v in zip(path[:-1], path[1:]):
+            if self.graph.has_edge(u, v):
+                edge_data = self.graph[u][v]
+
+                current_traffic = float(
+                    edge_data.get("traffic_mbps", 0.0)
+                )
+
+                edge_data["traffic_mbps"] = max(
+                    0.0,
+                    current_traffic - traffic
+                )
+
+        # Recalculate utilization after removing the demand
+        self.calculate_link_utilization()
+
+
+    def _select_reroute_path(
+        self,
+        demand_id,
+        congestion_aware=True,
+        require_alternative=True
+    ):
+        """
+        Select a new path from the K-shortest candidate paths.
+
+        Congestion mode:
+            Select the candidate with the lowest bottleneck utilization.
+
+        Failure mode:
+            Select the shortest healthy candidate path.
+
+        Failed nodes and failed links are always excluded.
+        """
+        if demand_id >= len(self.demands):
+            return None
+
+        demand = self.demands[demand_id]
+
+        src = demand.get("source", demand.get("src"))
+        dst = demand.get("destination", demand.get("dst"))
+
+        if src is None or dst is None:
+            return None
+
+        old_path = self.active_paths.get(demand_id)
+
+        # Generate K-shortest candidates using the existing RoutingEngine API
+        candidates = self.routing.k_shortest_paths(
+            src,
+            dst,
+            self.k_paths
+        )
+
+        valid_candidates = []
+
+        for path in candidates:
+
+            # Remove failed nodes / links
+            if not self._path_is_usable(path):
+                continue
+
+            # For congestion rerouting, prefer a genuinely different route
+            if require_alternative and old_path is not None:
+                if list(path) == list(old_path):
+                    continue
+
+            # Calculate path characteristics
+            path_cost = self.routing.path_cost(path)
+
+            if congestion_aware:
+                # Maximum utilization along the candidate path
+                bottleneck_utilization = 0.0
+
+                for u, v in zip(path[:-1], path[1:]):
+                    if not self.graph.has_edge(u, v):
+                        bottleneck_utilization = float("inf")
+                        break
+
+                    utilization = float(
+                        self.graph[u][v].get("utilization", 0.0)
+                    )
+
+                    bottleneck_utilization = max(
+                        bottleneck_utilization,
+                        utilization
+                    )
+
+                # First minimize congestion.
+                # Path cost is used as a tie-breaker.
+                score = (
+                    bottleneck_utilization,
+                    path_cost
+                )
+
+            else:
+                # Failure recovery:
+                # among healthy paths, prefer the shortest path.
+                score = (
+                    path_cost,
+                    self.routing.bottleneck_utilization(path)
+                )
+
+            valid_candidates.append((score, path))
+
+        if not valid_candidates:
+            return None
+
+        # Lowest score wins
+        valid_candidates.sort(key=lambda item: item[0])
+
+        return valid_candidates[0][1]
+
+
+    def reroute_demand(
+        self,
+        demand_id,
+        congestion_aware=True,
+        require_alternative=True
+    ):
+        """
+        Reroute a single demand using K-shortest candidate paths.
+
+        Args:
+            demand_id: Demand index.
+            congestion_aware:
+                True  -> select least-congested candidate.
+                False -> select shortest healthy candidate.
+            require_alternative:
+                True -> do not select the existing path.
+                False -> existing path is allowed.
+
+        Returns:
+            True if the demand was successfully rerouted,
+            False otherwise.
+        """
+
+        if demand_id not in self.active_paths:
+            return False
+
+        old_path = list(self.active_paths[demand_id])
+
+        # Remove this demand from the network before evaluating
+        # candidate path congestion.
+        self._remove_demand_traffic(demand_id)
+
+        new_path = self._select_reroute_path(
+            demand_id,
+            congestion_aware=congestion_aware,
+            require_alternative=require_alternative
+        )
+
+        # If no alternative exists, restore the original network state.
+        if new_path is None:
+
+            self._apply_all_traffic()
+
+            return False
+
+        self.active_paths[demand_id] = list(new_path)
+
+        # Re-apply every demand using the updated paths
+        self._apply_all_traffic()
+
+        return old_path != list(new_path)
+
+
+    def reroute_all_demands(
+        self,
+        congestion_aware=True,
+        require_alternative=True
+    ):
+        """
+        Reroute all active demands using K-shortest candidate paths.
+
+        Each demand is evaluated sequentially so that a route selected
+        for one demand affects the congestion seen by subsequent demands.
+
+        Returns:
+            Number of demands whose paths actually changed.
+        """
+
+        changed_count = 0
+
+        # Work on a stable list because active_paths can potentially change
+        demand_ids = list(self.active_paths.keys())
+
+        for demand_id in demand_ids:
+
+            if demand_id not in self.active_paths:
+                continue
+
+            old_path = list(self.active_paths[demand_id])
+
+            # Remove this demand's traffic before evaluating alternatives
+            self._remove_demand_traffic(demand_id)
+
+            new_path = self._select_reroute_path(
+                demand_id,
+                congestion_aware=congestion_aware,
+                require_alternative=require_alternative
             )
 
             if new_path is None:
-                self.active_paths.pop(
-                    demand_id,
-                    None,
-                )
-                continue
+                # Keep old path if no usable alternative exists
+                self.active_paths[demand_id] = old_path
+            else:
+                self.active_paths[demand_id] = list(new_path)
 
-            if old_path != new_path:
-                rerouted += 1
+                if old_path != list(new_path):
+                    changed_count += 1
 
-            self.active_paths[demand_id] = new_path
+            # Important:
+            # update network traffic before evaluating the next demand.
+            self._apply_all_traffic()
 
+        # Final traffic application
         self._apply_all_traffic()
 
-        return rerouted
+        return changed_count
+
 
     # ==============================================================
     # RATE LIMITING
@@ -1272,101 +1473,166 @@ class NetworkSimulator:
         failure_action: int = 0,
     ) -> Dict[str, Any]:
         """
-        Execute actions selected by the two RL agents.
+        Execute high-level actions selected by the MARL agents.
 
-        Congestion actions:
-            0 = maintain
-            1 = reroute
-            2 = rate-limit
+        Congestion Agent:
+            0 -> maintain
+            1 -> reroute using congestion-aware K-shortest selection
+            2 -> rate-limit traffic
 
-        Failure actions:
-            0 = no action
-            1 = reroute
-            2 = isolate failed component
+        Failure Agent:
+            0 -> no action
+            1 -> reroute affected demands around failures
+            2 -> isolate failed components and reroute affected demands
+
+        Returns:
+            Dictionary containing action results and network metrics.
         """
 
-        info: Dict[str, Any] = {
-            "congestion_action": congestion_action,
-            "failure_action": failure_action,
-            "rerouted_demands": 0,
-            "rate_limited_traffic_mbps": 0.0,
-            "isolation": None,
-        }
+    # Validate congestion action
+        if congestion_action not in (0, 1, 2):
+            raise ValueError(
+                f"Invalid congestion_action: {congestion_action}. "
+                "Expected 0, 1, or 2."
+            )
 
-        # ----------------------------------------------------------
-        # CONGESTION AGENT
-        # ----------------------------------------------------------
+    # Validate failure action
+        if failure_action not in (0, 1, 2):
+            raise ValueError(
+                f"Invalid failure_action: {failure_action}. "
+                "Expected 0, 1, or 2."
+            )
+
+        action_results = {}
+
+    # ============================================================
+    # CONGESTION AGENT
+    # ============================================================
 
         if congestion_action == 0:
-
-            # Maintain current routing.
-            pass
+            action_results["congestion"] = {
+                "action": "maintain",
+                "applied": True
+            }
 
         elif congestion_action == 1:
 
-            # Reroute traffic.
-            info["rerouted_demands"] = (
-                self.reroute_all_demands()
+            changed = self.reroute_all_demands(
+                congestion_aware=True,
+                require_alternative=True
             )
+
+            action_results["congestion"] = {
+                "action": "reroute",
+                "applied": True,
+                "rerouted_demands": changed
+            }
 
         elif congestion_action == 2:
 
-            # Rate-limit traffic.
-            info["rate_limited_traffic_mbps"] = (
-                self.rate_limit_demands()
-            )
+        # Existing rate-limit implementation
+            self.rate_limit_demands(0.7)
 
-        else:
+            action_results["congestion"] = {
+                "action": "rate_limit",
+                "applied": True,
+                "factor": 0.7
+            }
 
-            raise ValueError(
-                "Invalid congestion action. "
-                "Expected 0, 1, or 2."
-            )
-
-        # ----------------------------------------------------------
-        # FAILURE AGENT
-        # ----------------------------------------------------------
+    # ============================================================
+    # FAILURE AGENT
+    # ============================================================
 
         if failure_action == 0:
 
-            # No action.
-            pass
+            action_results["failure"] = {
+                "action": "no_action",
+                "applied": True
+            }
 
         elif failure_action == 1:
 
-            # Attempt rerouting around failures.
-            info["rerouted_demands"] += (
-                self.reroute_all_demands()
+            changed = self.reroute_all_demands(
+                congestion_aware=False,
+                require_alternative=False
             )
+
+            action_results["failure"] = {
+                "action": "reroute",
+                "applied": True,
+                "rerouted_demands": changed
+            }
 
         elif failure_action == 2:
 
-            # Isolate failed components.
-            info["isolation"] = (
-                self.isolate_failed_components()
-            )
+            isolation_result = self.isolate_failed_components()
 
-        else:
+        # After isolating failed components, reroute demands that
+        # can no longer use their current paths.
+            changed = 0
 
-            raise ValueError(
-                "Invalid failure action. "
-                "Expected 0, 1, or 2."
-            )
+            demand_ids = list(self.active_paths.keys())
 
-        # ----------------------------------------------------------
-        # RECALCULATE NETWORK
-        # ----------------------------------------------------------
+            for demand_id in demand_ids:
+
+                current_path = self.active_paths.get(demand_id)
+
+                if current_path is None:
+                    continue
+
+            # Only reroute demands whose current path is broken
+                if not self._path_is_usable(current_path):
+
+                    old_path = list(current_path)
+
+                # Remove old path before finding a replacement
+                    self._remove_demand_traffic(demand_id)
+
+                    new_path = self._select_reroute_path(
+                        demand_id,
+                        congestion_aware=False,
+                        require_alternative=False
+                    )
+
+                    if new_path is not None:
+
+                        self.active_paths[demand_id] = list(new_path)
+
+                        if old_path != list(new_path):
+                            changed += 1
+
+                    else:
+                        # No valid route remains
+                        self.active_paths.pop(demand_id, None)
+
+                    self._apply_all_traffic()
+
+            action_results["failure"] = {
+                "action": "isolate_and_reroute",
+                "applied": True,
+                "isolated": isolation_result,
+                "rerouted_demands": changed
+            }
+
+    # ============================================================
+    # FINAL NETWORK UPDATE
+    # ============================================================
 
         self._apply_all_traffic()
 
-        result = self.calculate_network_metrics()
+        metrics = self.calculate_network_metrics()
 
-        result["action_info"] = info
+        result = {
+            "congestion_action": congestion_action,
+            "failure_action": failure_action,
+            "actions": action_results,
+            "metrics": metrics
+        }
 
+    # Preserve the existing simulator behaviour
         self.last_result = result
 
         return result
-
     # ==============================================================
     # STEP
     # ==============================================================

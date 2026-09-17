@@ -5,18 +5,20 @@ Agents:
     1. Congestion Agent
     2. Failure Agent
 
-The current version uses the dummy environment.
+Environment:
+    simulator.environment.SDNEnvironment
 """
 
 import csv
 import os
+import random
+
+import numpy as np
+import torch
 
 from agents.congestion_agent import CongestionAgent
 from agents.failure_agent import FailureAgent
-
-from simulator.dummy_simulator import (
-    DummySDNMultiAgentEnvironment,
-)
+from simulator.environment import SDNEnvironment
 
 from training.config import (
     AGENT_HIDDEN_DIM,
@@ -43,15 +45,176 @@ from training.config import (
 )
 
 
-def save_training_history(
-    history,
-    filepath,
-):
+# ============================================================
+# Training configuration
+# ============================================================
+
+TRAINING_TOPOLOGIES = [
+    "Abilene.gml",
+]
+
+TOPOLOGY_DIR = os.path.join(
+    "InternetTopologyZoo",
+    "gml",
+)
+
+TRAFFIC_SCENARIO = "normal"
+
+NUM_DEMANDS = 10
+
+K_PATHS = 5
+
+SEED = 42
+
+
+# ============================================================
+# Reproducibility
+# ============================================================
+
+def set_seed(seed):
+    """Set random seeds for reproducible training."""
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# ============================================================
+# State validation
+# ============================================================
+
+def validate_state(state):
+    """
+    Validate the state returned by SDNEnvironment.
+
+    Expected state:
+        node_features   [N, 7]
+        edge_index      [2, E]
+        edge_features   [E, 5]
+        demand_features [1, 1]
+    """
+
+    required_keys = {
+        "node_features",
+        "edge_index",
+        "edge_features",
+        "demand_features",
+    }
+
+    missing = required_keys - set(state.keys())
+
+    if missing:
+        raise KeyError(
+            f"State is missing required keys: {sorted(missing)}"
+        )
+
+    node_features = torch.as_tensor(
+        state["node_features"]
+    )
+
+    edge_index = torch.as_tensor(
+        state["edge_index"]
+    )
+
+    edge_features = torch.as_tensor(
+        state["edge_features"]
+    )
+
+    demand_features = torch.as_tensor(
+        state["demand_features"]
+    )
+
+    if node_features.dim() != 2:
+        raise ValueError(
+            "node_features must be 2-dimensional."
+        )
+
+    if node_features.shape[1] != 7:
+        raise ValueError(
+            "node_features must have shape [N, 7]. "
+            f"Got {tuple(node_features.shape)}."
+        )
+
+    if edge_index.dim() != 2:
+        raise ValueError(
+            "edge_index must be 2-dimensional."
+        )
+
+    if edge_index.shape[0] != 2:
+        raise ValueError(
+            "edge_index must have shape [2, E]. "
+            f"Got {tuple(edge_index.shape)}."
+        )
+
+    if edge_features.dim() != 2:
+        raise ValueError(
+            "edge_features must be 2-dimensional."
+        )
+
+    if edge_features.shape[1] != EDGE_FEATURE_DIM:
+        raise ValueError(
+            "edge_features must have shape [E, 5]. "
+            f"Got {tuple(edge_features.shape)}."
+        )
+
+    if edge_features.shape[0] != edge_index.shape[1]:
+        raise ValueError(
+            "Number of edge features must match "
+            "number of edges in edge_index."
+        )
+
+    if demand_features.dim() != 2:
+        raise ValueError(
+            "demand_features must be 2-dimensional."
+        )
+
+    if demand_features.shape != (1, 1):
+        raise ValueError(
+            "demand_features must have shape [1, 1]. "
+            f"Got {tuple(demand_features.shape)}."
+        )
+
+    return True
+
+
+# ============================================================
+# Environment creation
+# ============================================================
+
+def create_environment(topology_name, episode):
+    """Create an SDN environment for one training episode."""
+
+    topology_path = os.path.join(
+        TOPOLOGY_DIR,
+        topology_name,
+    )
+
+    if not os.path.isfile(topology_path):
+        raise FileNotFoundError(
+            f"Topology file not found: {topology_path}"
+        )
+
+    return SDNEnvironment(
+        topology_path=topology_path,
+        traffic_scenario=TRAFFIC_SCENARIO,
+        num_demands=NUM_DEMANDS,
+        max_steps=MAX_STEPS_PER_EPISODE,
+        k_paths=K_PATHS,
+        random_seed=SEED + episode,
+    )
+
+
+# ============================================================
+# Save training history
+# ============================================================
+
+def save_training_history(history, filepath):
     """Save training statistics to CSV."""
 
-    directory = os.path.dirname(
-        filepath
-    )
+    directory = os.path.dirname(filepath)
 
     if directory:
         os.makedirs(
@@ -71,6 +234,7 @@ def save_training_history(
         writer.writerow(
             [
                 "episode",
+                "topology",
                 "total_reward",
                 "average_reward",
                 "congestion_loss",
@@ -86,6 +250,7 @@ def save_training_history(
             writer.writerow(
                 [
                     row["episode"],
+                    row["topology"],
                     row["total_reward"],
                     row["average_reward"],
                     row["congestion_loss"],
@@ -97,31 +262,26 @@ def save_training_history(
             )
 
 
+# ============================================================
+# Main training function
+# ============================================================
+
 def main():
 
-    # ================================================
+    set_seed(SEED)
+
+    # ========================================================
     # Output directory
-    # ================================================
+    # ========================================================
 
     os.makedirs(
         CHECKPOINT_DIR,
         exist_ok=True,
     )
 
-    # ================================================
-    # Environment
-    # ================================================
-
-    env = DummySDNMultiAgentEnvironment(
-        min_nodes=5,
-        max_nodes=8,
-        max_steps=MAX_STEPS_PER_EPISODE,
-        seed=42,
-    )
-
-    # ================================================
+    # ========================================================
     # Congestion Agent
-    # ================================================
+    # ========================================================
 
     congestion_agent = CongestionAgent(
         node_feature_dim=7,
@@ -151,9 +311,9 @@ def main():
         device=DEVICE,
     )
 
-    # ================================================
+    # ========================================================
     # Failure Agent
-    # ================================================
+    # ========================================================
 
     failure_agent = FailureAgent(
         node_feature_dim=7,
@@ -183,9 +343,9 @@ def main():
         device=DEVICE,
     )
 
-    # ================================================
+    # ========================================================
     # Print configuration
-    # ================================================
+    # ========================================================
 
     print("=" * 70)
     print("TWO-AGENT SDN-MARL TRAINING")
@@ -197,6 +357,22 @@ def main():
 
     print(
         f"Max steps:             {MAX_STEPS_PER_EPISODE}"
+    )
+
+    print(
+        f"Training topologies:   {TRAINING_TOPOLOGIES}"
+    )
+
+    print(
+        f"Traffic scenario:      {TRAFFIC_SCENARIO}"
+    )
+
+    print(
+        f"Number of demands:     {NUM_DEMANDS}"
+    )
+
+    print(
+        f"K paths:               {K_PATHS}"
     )
 
     print(
@@ -215,115 +391,163 @@ def main():
 
     history = []
 
-    # ================================================
+    # ========================================================
     # Training
-    # ================================================
+    # ========================================================
 
     for episode in range(
         1,
         NUM_EPISODES + 1,
     ):
 
-        state = env.reset()
+        # ----------------------------------------------------
+        # Rotate through training topologies
+        # ----------------------------------------------------
 
-        done = False
-        steps = 0
-        total_reward = 0.0
+        topology_name = TRAINING_TOPOLOGIES[
+            (episode - 1)
+            % len(TRAINING_TOPOLOGIES)
+        ]
 
-        congestion_losses = []
-        failure_losses = []
+        # ----------------------------------------------------
+        # Create environment for this episode
+        # ----------------------------------------------------
 
-        while (
-            not done
-            and steps
-            < MAX_STEPS_PER_EPISODE
-        ):
+        env = create_environment(
+            topology_name,
+            episode,
+        )
 
-            # ----------------------------------------
-            # Agent decisions
-            # ----------------------------------------
+        try:
 
-            congestion_action = (
-                congestion_agent.select_action(
+            state = env.reset()
+
+            validate_state(state)
+
+            done = False
+            steps = 0
+            total_reward = 0.0
+
+            congestion_losses = []
+            failure_losses = []
+
+            # =================================================
+            # Episode loop
+            # =================================================
+
+            while (
+                not done
+                and steps < MAX_STEPS_PER_EPISODE
+            ):
+
+                # ---------------------------------------------
+                # Validate current state
+                # ---------------------------------------------
+
+                validate_state(state)
+
+                # ---------------------------------------------
+                # Agent decisions
+                # ---------------------------------------------
+
+                congestion_action = (
+                    congestion_agent.select_action(
+                        state,
+                        training=True,
+                    )
+                )
+
+                failure_action = (
+                    failure_agent.select_action(
+                        state,
+                        training=True,
+                    )
+                )
+
+                # ---------------------------------------------
+                # Environment step
+                # ---------------------------------------------
+
+                (
+                    next_state,
+                    reward,
+                    done,
+                    info,
+                ) = env.step(
+                    congestion_action,
+                    failure_action,
+                )
+
+                # ---------------------------------------------
+                # Validate next state
+                # ---------------------------------------------
+
+                validate_state(next_state)
+
+                # ---------------------------------------------
+                # Store congestion experience
+                # ---------------------------------------------
+
+                congestion_agent.remember(
                     state,
-                    training=True,
+                    congestion_action,
+                    reward,
+                    next_state,
+                    done,
                 )
-            )
 
-            failure_action = (
-                failure_agent.select_action(
+                # ---------------------------------------------
+                # Store failure experience
+                # ---------------------------------------------
+
+                failure_agent.remember(
                     state,
-                    training=True,
-                )
-            )
-
-            # ----------------------------------------
-            # Environment
-            # ----------------------------------------
-
-            (
-                next_state,
-                reward,
-                done,
-                info,
-            ) = env.step(
-                congestion_action,
-                failure_action,
-            )
-
-            # ----------------------------------------
-            # Store experiences
-            # ----------------------------------------
-
-            congestion_agent.remember(
-                state,
-                congestion_action,
-                reward,
-                next_state,
-                done,
-            )
-
-            failure_agent.remember(
-                state,
-                failure_action,
-                reward,
-                next_state,
-                done,
-            )
-
-            # ----------------------------------------
-            # Learn
-            # ----------------------------------------
-
-            congestion_loss = (
-                congestion_agent.learn()
-            )
-
-            failure_loss = (
-                failure_agent.learn()
-            )
-
-            if congestion_loss is not None:
-
-                congestion_losses.append(
-                    congestion_loss
+                    failure_action,
+                    reward,
+                    next_state,
+                    done,
                 )
 
-            if failure_loss is not None:
+                # ---------------------------------------------
+                # Learn
+                # ---------------------------------------------
 
-                failure_losses.append(
-                    failure_loss
+                congestion_loss = (
+                    congestion_agent.learn()
                 )
 
-            state = next_state
+                failure_loss = (
+                    failure_agent.learn()
+                )
 
-            total_reward += reward
+                if congestion_loss is not None:
+                    congestion_losses.append(
+                        congestion_loss
+                    )
 
-            steps += 1
+                if failure_loss is not None:
+                    failure_losses.append(
+                        failure_loss
+                    )
 
-        # ============================================
+                # ---------------------------------------------
+                # Advance state
+                # ---------------------------------------------
+
+                state = next_state
+
+                total_reward += float(reward)
+
+                steps += 1
+
+        finally:
+
+            # Release the episode environment.
+            del env
+
+        # ====================================================
         # Episode statistics
-        # ============================================
+        # ====================================================
 
         average_reward = (
             total_reward
@@ -346,6 +570,7 @@ def main():
 
         result = {
             "episode": episode,
+            "topology": topology_name,
             "total_reward": total_reward,
             "average_reward": average_reward,
             "congestion_loss":
@@ -361,9 +586,9 @@ def main():
 
         history.append(result)
 
-        # ============================================
+        # ====================================================
         # Logging
-        # ============================================
+        # ====================================================
 
         if (
             episode == 1
@@ -372,24 +597,20 @@ def main():
 
             print(
                 f"Episode {episode:4d}/{NUM_EPISODES} | "
+                f"Topology: {topology_name:20s} | "
                 f"Reward: {total_reward:8.3f} | "
-                f"CongLoss: "
-                f"{average_congestion_loss:.5f} | "
-                f"FailLoss: "
-                f"{average_failure_loss:.5f} | "
-                f"CongEps: "
-                f"{congestion_agent.epsilon:.3f} | "
-                f"FailEps: "
-                f"{failure_agent.epsilon:.3f}"
+                f"CongLoss: {average_congestion_loss:.5f} | "
+                f"FailLoss: {average_failure_loss:.5f} | "
+                f"CongEps: {congestion_agent.epsilon:.3f} | "
+                f"FailEps: {failure_agent.epsilon:.3f}"
             )
 
-        # ============================================
+        # ====================================================
         # Checkpoints
-        # ============================================
+        # ====================================================
 
         if (
-            episode
-            % CHECKPOINT_FREQUENCY
+            episode % CHECKPOINT_FREQUENCY
             == 0
         ):
 
@@ -416,35 +637,45 @@ def main():
                 f"episode {episode}"
             )
 
-    # ================================================
+    # ========================================================
     # Final models
-    # ================================================
+    # ========================================================
+
+    congestion_final_path = os.path.join(
+        CHECKPOINT_DIR,
+        "congestion_final.pt",
+    )
+
+    failure_final_path = os.path.join(
+        CHECKPOINT_DIR,
+        "failure_final.pt",
+    )
 
     congestion_agent.save(
-        os.path.join(
-            CHECKPOINT_DIR,
-            "congestion_final.pt",
-        )
+        congestion_final_path
     )
 
     failure_agent.save(
-        os.path.join(
-            CHECKPOINT_DIR,
-            "failure_final.pt",
-        )
+        failure_final_path
     )
 
-    # ================================================
+    # ========================================================
     # Training history
-    # ================================================
+    # ========================================================
+
+    history_path = os.path.join(
+        CHECKPOINT_DIR,
+        "multi_agent_history.csv",
+    )
 
     save_training_history(
         history,
-        os.path.join(
-            CHECKPOINT_DIR,
-            "multi_agent_history.csv",
-        ),
+        history_path,
     )
+
+    # ========================================================
+    # Completion
+    # ========================================================
 
     print()
     print("=" * 70)
@@ -453,17 +684,17 @@ def main():
 
     print(
         "Congestion model: "
-        f"{CHECKPOINT_DIR}/congestion_final.pt"
+        f"{congestion_final_path}"
     )
 
     print(
         "Failure model:    "
-        f"{CHECKPOINT_DIR}/failure_final.pt"
+        f"{failure_final_path}"
     )
 
     print(
         "Training history: "
-        f"{CHECKPOINT_DIR}/multi_agent_history.csv"
+        f"{history_path}"
     )
 
     print("=" * 70)

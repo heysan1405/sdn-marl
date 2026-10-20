@@ -313,10 +313,14 @@ def main():
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--scenario", choices=["normal", "heavy", "single_hotspot", "multiple_hotspots", "traffic_spike", "random"], default=TRAFFIC_SCENARIO)
+    parser.add_argument("--topologies", nargs="+", default=TRAINING_TOPOLOGIES,
+                        help="Topology Zoo GML filenames rotated across episodes.")
     parser.add_argument("--failure-probability", type=float, default=0.5,
                         help="Per-episode probability of injecting one random link failure.")
     parser.add_argument("--traffic-scale", type=float, default=1.0,
                         help="Explicit simulator-generated demand multiplier; useful for stress scenarios.")
+    parser.add_argument("--traffic-scales", type=float, nargs="+", default=None,
+                        help="Optional episode-rotated traffic multipliers for controlled intensity diversity.")
     parser.add_argument("--train-agent", choices=["both", "congestion", "failure"], default="both",
                         help="Train both DQNs jointly, or isolate one with the other agent held at no-op.")
     parser.add_argument("--output-dir", default="results/training_dqn_seed42")
@@ -328,6 +332,16 @@ def main():
         parser.error("failure-probability must be between 0 and 1")
     if not np.isfinite(args.traffic_scale) or args.traffic_scale <= 0:
         parser.error("traffic-scale must be a finite positive number")
+    if args.traffic_scales is not None and any(not np.isfinite(x) or x <= 0 for x in args.traffic_scales):
+        parser.error("all traffic-scales must be finite positive numbers")
+    if not args.topologies or any(
+        Path(name).name != name or not name.lower().endswith(".gml")
+        for name in args.topologies
+    ):
+        parser.error("topologies must be one or more GML filenames, without directory components")
+    missing_topologies = [name for name in args.topologies if not os.path.isfile(os.path.join(TOPOLOGY_DIR, name))]
+    if missing_topologies:
+        parser.error(f"topology file(s) not found under {TOPOLOGY_DIR}: {', '.join(missing_topologies)}")
     NUM_EPISODES, MAX_STEPS_PER_EPISODE = args.episodes, args.max_steps
     NUM_DEMANDS, BATCH_SIZE = args.num_demands, args.batch_size
     SEED, TRAFFIC_SCENARIO, CHECKPOINT_DIR = args.seed, args.scenario, args.output_dir
@@ -347,7 +361,9 @@ def main():
     )
     run_config = vars(args).copy()
     run_config["device"] = str(DEVICE or ("cuda" if torch.cuda.is_available() else "cpu"))
-    run_config["topologies"] = TRAINING_TOPOLOGIES
+    run_config["topologies"] = args.topologies
+    traffic_scales = args.traffic_scales or [args.traffic_scale]
+    run_config["traffic_scales"] = traffic_scales
     with open(os.path.join(CHECKPOINT_DIR, "config.json"), "w", encoding="utf-8") as config_file:
         json.dump(run_config, config_file, indent=2)
 
@@ -432,7 +448,7 @@ def main():
     )
 
     print(
-        f"Training topologies:   {TRAINING_TOPOLOGIES}"
+        f"Training topologies:   {args.topologies}"
     )
 
     print(
@@ -476,9 +492,9 @@ def main():
         # Rotate through training topologies
         # ----------------------------------------------------
 
-        topology_name = TRAINING_TOPOLOGIES[
+        topology_name = args.topologies[
             (episode - 1)
-            % len(TRAINING_TOPOLOGIES)
+            % len(args.topologies)
         ]
 
         # ----------------------------------------------------
@@ -488,7 +504,7 @@ def main():
         env = create_environment(
             topology_name,
             episode,
-            traffic_scale=args.traffic_scale,
+            traffic_scale=traffic_scales[(episode - 1) % len(traffic_scales)],
         )
 
         try:

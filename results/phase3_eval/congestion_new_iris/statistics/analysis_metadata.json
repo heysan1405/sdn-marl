@@ -1,0 +1,8 @@
+{
+  "input": "results\\phase3_eval\\congestion_new_iris\\evaluation.json",
+  "bootstrap_samples": 5000,
+  "random_seed": 20261023,
+  "resampling": "paired percentile bootstrap; sign-flip randomization p-values",
+  "multiple_testing": "Holm step-down across all emitted policy/scenario/metric comparisons",
+  "interpretation": "Simulator-generated outcomes; paired association only, not causal evidence beyond this scenario generator."
+}

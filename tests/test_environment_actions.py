@@ -21,6 +21,37 @@ def test_traffic_scale_is_applied_to_generated_offered_load(tmp_path):
     ]
 
 
+def test_undirected_links_are_serialized_in_both_message_directions(tmp_path):
+    env = make_env(tmp_path)
+    state = env._build_state()
+    edge_index = state["edge_index"]
+    edge_features = state["edge_features"]
+
+    assert edge_index.shape[1] == 2 * env.graph.number_of_edges()
+    directed = {tuple(edge): i for i, edge in enumerate(edge_index.T.tolist())}
+    for (source, target), index in directed.items():
+        reverse_index = directed[(target, source)]
+        assert (edge_features[index] == edge_features[reverse_index]).all()
+
+
+def test_state_dimensions_and_action_masks_work_on_variable_graph_sizes(tmp_path):
+    from agents.congestion_agent import CongestionAgent
+
+    for name, edges, expected_nodes in (
+        ("small", [(0, 1), (1, 2)], 3),
+        ("larger", [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2)], 4),
+    ):
+        path = tmp_path / f"{name}.gml"
+        nx.write_gml(nx.Graph(edges), path)
+        env = SDNEnvironment(str(path), num_demands=1, max_steps=1, random_seed=21)
+        state = env.reset(seed=21)
+        assert state["node_features"].shape == (expected_nodes, 7)
+        assert state["edge_features"].shape == (2 * len(edges), 5)
+        agent = CongestionAgent(device="cpu")
+        action = agent.select_action(state, training=False)
+        assert action in (env.CONGESTION_MAINTAIN, env.CONGESTION_REROUTE, env.CONGESTION_RATE_LIMIT)
+
+
 def test_rate_limit_changes_offered_load_but_keeps_original_denominator(tmp_path):
     env = make_env(tmp_path, 5.0)
     before = env.simulator.demands[0]["traffic_mbps"]

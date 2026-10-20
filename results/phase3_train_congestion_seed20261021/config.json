@@ -1,0 +1,23 @@
+{
+  "episodes": 48,
+  "max_steps": 12,
+  "num_demands": 12,
+  "batch_size": 16,
+  "seed": 20261021,
+  "scenario": "heavy",
+  "topologies": [
+    "UsCarrier.gml",
+    "Colt.gml",
+    "GtsCe.gml"
+  ],
+  "failure_probability": 0.0,
+  "traffic_scale": 1.0,
+  "traffic_scales": [
+    2.0,
+    8.0
+  ],
+  "train_agent": "congestion",
+  "output_dir": "results/phase3_train_congestion_seed20261021",
+  "overwrite": false,
+  "device": "cuda"
+}

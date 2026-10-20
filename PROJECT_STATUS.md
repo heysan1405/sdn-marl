@@ -177,6 +177,47 @@ shortest-path reference. Full-graph learned-policy testing is still blocked by
 missing topology state/traffic measurements, while the full graph-only sampled
 route test completed successfully.
 
+## Phase 3: transfer diagnosis and multi-topology retraining (2026-10-20)
+
+Baseline recorded at commit `53d9a4a`. Existing checkpoints and Phase 2 results
+were preserved. The concrete transfer defect found was that an undirected
+NetworkX link was emitted as one directed PyG message edge. All 14 Abilene, 64
+Iris, and 243 Cogentco links lacked a reverse message edge. `SDNEnvironment`
+now emits both directions with identical feature rows; the five edge feature
+semantics and DQN dimensions did not change. Regression tests verify this and
+variable graph-size inference. The diagnosis also found materially different
+link-capacity distributions: Abilene uses loaded OC-192 9,953.28 Mbps capacities,
+whereas Cogentco/Iris use the loader's explicit 1,000 Mbps default. Raw
+capacity, delay, and demand remain unnormalized, while degree/coordinates are
+topology-relative. No absolute node IDs are used, and global actions are
+consistent across graph sizes. Replay buffers were not checkpointed, so their
+historical diversity and Q-value distributions are unavailable.
+
+The existing trainer now accepts explicit `--topologies` and rotating
+`--traffic-scales` while retaining old defaults. New Congestion and Failure
+DQN runs trained 48 episodes each across UsCarrier, Colt, and GtsCe at 2x/8x
+simulator-generated heavy traffic, with seeds 20261021/20261022. Each completed
+576 environment steps and 561 optimizer updates. New checkpoints, configs,
+histories, and summaries are in `results/phase3_train_congestion_seed20261021/`
+and `results/phase3_train_failure_seed20261022/`. Each was reloaded by the
+fresh-process evaluator. Congestion transfer did not improve: the new policy
+chose maintain for all 40 8x decisions on Cogentco and Abilene and all 40 on
+Iris; on Abilene it had higher offered shortfall/delay than the old model. The
+new Failure DQN matched immediate shortest-path delivery under failure-only
+conditions but recovered 1–1.5 control steps later; under combined stress it
+underperformed shortest path on Cogentco and Iris. The rule orchestrator
+remains rule-based; its Iris combined-stress ablation is not enough to establish
+coordination value. See `experiments/phase3/REPORT.md` and `results/phase3_eval/`
+for held-out raw rows and statistical outputs.
+
+The dataset tree named `scalability/` contains archived simulator runs in
+`scalability/train/` (25–70-node cases) and `scalability/test/` (50–300-node
+cases); it is distinct from the CAIDA Matrix Market input in `tech-RL-caida/`.
+Those archive fields were not silently mapped to DQN state features. The Phase
+2 graph-only CAIDA results remain unchanged and no CAIDA QoS claims are made.
+Full test suite: 27 passed. `compileall` and `git diff --check` passed; only
+third-party PyG annotation deprecation warnings were emitted by tests.
+
 ## Phase 2 reproducibility and generalization (2026-10-20)
 
 See [`experiments/phase2/REPORT.md`](experiments/phase2/REPORT.md) for metric

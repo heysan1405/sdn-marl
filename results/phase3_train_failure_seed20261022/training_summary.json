@@ -1,0 +1,46 @@
+{
+  "episodes": 48,
+  "environment_steps": 576,
+  "congestion_optimizer_updates": 0,
+  "failure_optimizer_updates": 561,
+  "mean_episode_reward": -3.4223614510065814,
+  "training_action_counts": {
+    "congestion": [
+      576,
+      0,
+      0
+    ],
+    "failure": [
+      242,
+      185,
+      149
+    ]
+  },
+  "runtime_seconds": 156.71761710000283,
+  "trained_agent": "failure",
+  "congestion_checkpoint": null,
+  "failure_checkpoint": "results/phase3_train_failure_seed20261022\\failure_dqn_final.pt",
+  "config": {
+    "episodes": 48,
+    "max_steps": 12,
+    "num_demands": 12,
+    "batch_size": 16,
+    "seed": 20261022,
+    "scenario": "heavy",
+    "topologies": [
+      "UsCarrier.gml",
+      "Colt.gml",
+      "GtsCe.gml"
+    ],
+    "failure_probability": 1.0,
+    "traffic_scale": 1.0,
+    "traffic_scales": [
+      2.0,
+      8.0
+    ],
+    "train_agent": "failure",
+    "output_dir": "results/phase3_train_failure_seed20261022",
+    "overwrite": false,
+    "device": "cuda"
+  }
+}

@@ -979,13 +979,6 @@ class SDNEnvironment:
             data=True
         ):
 
-            edge_index.append(
-                [
-                    node_to_index[u],
-                    node_to_index[v],
-                ]
-            )
-
             link_key = (
                 self._canonical_link(u, v)
             )
@@ -1057,15 +1050,24 @@ class SDNEnvironment:
                 )
             )
 
-            edge_features.append(
+            # NetworkX Graph links are undirected, while PyG message passing
+            # consumes directed source->target edges. Emit both directions
+            # with identical measurements so the encoder sees the same link
+            # state regardless of NetworkX's arbitrary edge iteration order.
+            link_features = [
+                utilization,
+                capacity,
+                delay,
+                packet_loss,
+                is_failed,
+            ]
+            edge_index.extend(
                 [
-                    utilization,
-                    capacity,
-                    delay,
-                    packet_loss,
-                    is_failed,
+                    [node_to_index[u], node_to_index[v]],
+                    [node_to_index[v], node_to_index[u]],
                 ]
             )
+            edge_features.extend([link_features, link_features.copy()])
 
         # ----------------------------------------------------------
         # Convert edge index

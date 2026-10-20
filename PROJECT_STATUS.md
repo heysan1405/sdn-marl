@@ -177,3 +177,33 @@ shortest-path reference. Full-graph learned-policy testing is still blocked by
 missing topology state/traffic measurements, while the full graph-only sampled
 route test completed successfully.
 
+## Phase 2 reproducibility and generalization (2026-10-20)
+
+See [`experiments/phase2/REPORT.md`](experiments/phase2/REPORT.md) for metric
+definitions, reproducibility commands, per-policy tables, statistical analysis,
+topology transfer, CAIDA reruns, and limitations. This phase did not replace
+the trained checkpoints or earlier raw outputs. It extended the evaluator to
+include two simultaneous active-link failures and an orchestrator-without-
+overrides ablation, and records offered-demand shortfall so rate-limiting is
+not counted as free delivery. Metrics unsupported by the simulator are saved
+as `null`.
+
+New raw evaluations are under `results/phase2_final/`,
+`results/phase2_final_cogentco/`, and `results/phase2_final_iris/`; paired
+bootstrap/sign-flip analysis is saved in each `statistics/` subdirectory.
+Abilene used 20 matched seeds and 720 policy/scenario runs. Cogentco (197 nodes,
+243 edges) and Iris (51 nodes, 64 edges) used 10 seeds each. CAIDA subgraphs at
+1k/2k/5k/10k nodes were rerun under `results/phase2_multiseed/caida_reproduced/`,
+and the full 190,914-node graph completed 100 sampled pairs in 27.90 seconds at
+286.8 MiB peak RSS. All CAIDA pairs delivered without loops or dead ends.
+
+The Abilene congestion result is modest and did not survive Holm correction;
+the policy acted only by rate-limiting and did not reduce the congested-link
+ratio. Failure DQN matched shortest-path delivery but needed one control step.
+Cogentco showed no congestion-policy effect; Iris showed limited actions but
+no consistent benefit. Retraining was not performed because investigation did
+not identify a verified implementation defect to fix or a validated checkpoint
+selection criterion. The orchestrator remains rule-based, and its override
+benefit is unproven. The full test suite after this phase passed 25 tests;
+syntax compilation and `git diff --check` passed.
+

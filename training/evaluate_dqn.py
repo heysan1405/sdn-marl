@@ -34,7 +34,8 @@ def create_agent(agent_type, device):
     )
 
 
-def used_link_to_fail(env):
+def used_links_to_fail(env, count=1):
+    """Return distinct active links ordered by descending flow count."""
     uses = {}
     for path in env.simulator.active_paths.values():
         for edge in zip(path[:-1], path[1:]):
@@ -42,13 +43,12 @@ def used_link_to_fail(env):
             uses[key] = uses.get(key, 0) + 1
     if not uses:
         raise RuntimeError("No routed traffic exists for failure injection")
-    u, v = min(uses, key=lambda e: (-uses[e], e))
-    return u, v
+    return sorted(uses, key=lambda e: (-uses[e], e))[:count]
 
 
 def run_episode(topology, scenario, seed, method, congestion_agent=None,
                 failure_agent=None, inject_failure=False, num_demands=12,
-                traffic_scale=1.0, traffic_scenario=None):
+                traffic_scale=1.0, traffic_scenario=None, failure_count=1):
     started = time.perf_counter()
     env = SDNEnvironment(
         topology_path=topology, traffic_scenario=traffic_scenario or scenario,
@@ -57,10 +57,11 @@ def run_episode(topology, scenario, seed, method, congestion_agent=None,
         traffic_scale=traffic_scale,
     )
     state = env.reset(seed=seed)
-    failed_link = None
+    failed_links = []
     if inject_failure:
-        failed_link = used_link_to_fail(env)
-        env.inject_link_failure(*failed_link)
+        failed_links = used_links_to_fail(env, failure_count)
+        for failed_link in failed_links:
+            env.inject_link_failure(*failed_link)
         state = env._build_state()
         if method == "shortest_path":
             env.simulator.reroute_all_demands(
@@ -83,13 +84,15 @@ def run_episode(topology, scenario, seed, method, congestion_agent=None,
     action_counts = {"congestion": [0, 0, 0], "failure": [0, 0, 0]}
     overrides = 0
     while not done:
-        c_action = congestion_agent.select_action(state, training=False) if congestion_agent and method in {"congestion_dqn", "orchestrated"} else 0
-        f_action = failure_agent.select_action(state, training=False) if failure_agent and method in {"failure_dqn", "orchestrated"} else 0
-        if method == "orchestrated":
-            decision = coordinator.resolve(state, c_action, f_action)
-            if (decision.congestion_action, decision.failure_action) != (c_action, f_action):
-                overrides += 1
-            c_action, f_action = decision.congestion_action, decision.failure_action
+        coordinated = method in {"orchestrated", "orchestrated_no_override"}
+        c_action = congestion_agent.select_action(state, training=False) if congestion_agent and (method == "congestion_dqn" or coordinated) else 0
+        f_action = failure_agent.select_action(state, training=False) if failure_agent and (method == "failure_dqn" or coordinated) else 0
+        if method in {"orchestrated", "orchestrated_no_override"}:
+            if method == "orchestrated":
+                decision = coordinator.resolve(state, c_action, f_action)
+                if (decision.congestion_action, decision.failure_action) != (c_action, f_action):
+                    overrides += 1
+                c_action, f_action = decision.congestion_action, decision.failure_action
         action_counts["congestion"][c_action] += 1
         action_counts["failure"][f_action] += 1
         state, reward, done, _ = env.step(c_action, f_action)
@@ -100,6 +103,13 @@ def run_episode(topology, scenario, seed, method, congestion_agent=None,
             recovery_step = len(rewards)
 
     metrics = env.simulator.calculate_network_metrics()
+    link_rows = [row for row in metrics.get("link_statistics", [])
+                 if not row.get("is_failed", False)]
+    link_utils = [float(row.get("utilization", 0.0)) for row in link_rows]
+    original_offered = float(metrics.get("total_original_requested_traffic_mbps", 0.0))
+    offered_shortfall = (1.0 - float(metrics["total_throughput_mbps"]) / original_offered
+                         if original_offered > 0 else None)
+    offered_shortfall = min(1.0, max(0.0, offered_shortfall)) if offered_shortfall is not None else None
     paths = metrics.get("path_statistics", [])
     delivered_paths = []
     for demand_id in range(len(env.simulator.demands)):
@@ -111,35 +121,47 @@ def run_episode(topology, scenario, seed, method, congestion_agent=None,
         "scenario": scenario, "seed": seed, "method": method,
         "failure_injected": inject_failure,
         "traffic_scale": traffic_scale,
-        "failed_link": str(failed_link) if failed_link else "",
+        "failed_links": str(failed_links) if failed_links else "",
+        "injected_failure_count": len(failed_links),
         "steps": len(rewards), "total_reward": sum(rewards),
         "runtime_seconds": time.perf_counter() - started,
         "recovery_step": recovery_step,
         "failure_detection_step": 0 if inject_failure else None,
+        "failure_detection_time_seconds": None,
         "recovery_time_steps": recovery_step,
         "unserved_demand_steps": unserved_demand_steps,
         "mean_step_reward": statistics.mean(rewards) if rewards else None,
         "requested_mbps": metrics["total_requested_traffic_mbps"],
+        "original_offered_mbps": original_offered,
         "throughput_mbps": metrics["total_throughput_mbps"],
         "delivery_rate": len(delivered_paths) / max(1, metrics["total_demands"]),
+        "packet_loss_ratio_offered": offered_shortfall,
+        "dropped_packets": None,
         "mean_link_utilization": metrics["average_link_utilization"],
+        "max_link_utilization": max(link_utils) if link_utils else None,
+        "p95_link_utilization": float(np.percentile(link_utils, 95)) if link_utils else None,
         "congestion_ratio": metrics["congestion_ratio"],
         "mean_delay_ms": metrics["average_path_delay_ms"],
+        "jitter_ms": None,
         "packet_loss": metrics["average_packet_loss"],
         "mean_hops": statistics.mean(len(path) - 1 for path in delivered_paths) if delivered_paths else None,
         "loops": loop_count, "failed_demands": metrics["total_demands"] - len(delivered_paths),
         "congestion_actions": str(action_counts["congestion"]),
         "failure_actions": str(action_counts["failure"]),
         "orchestrator_overrides": overrides,
+        "agent_interventions": sum(action_counts["congestion"][1:])
+                                + sum(action_counts["failure"][1:]),
+        "peak_memory_bytes": None,
     }
     return result
 
 
 def summarize(rows):
-    keys = ["delivery_rate", "throughput_mbps", "mean_link_utilization",
+    keys = ["delivery_rate", "throughput_mbps", "packet_loss_ratio_offered",
+            "mean_link_utilization", "max_link_utilization", "p95_link_utilization",
             "congestion_ratio", "mean_delay_ms", "packet_loss", "mean_hops",
             "total_reward", "loops", "failed_demands", "recovery_step",
-            "unserved_demand_steps", "orchestrator_overrides", "runtime_seconds"]
+            "unserved_demand_steps", "agent_interventions", "orchestrator_overrides", "runtime_seconds"]
     summaries = []
     for method in sorted({row["method"] for row in rows}):
         selected = [row for row in rows if row["method"] == method]
@@ -198,13 +220,16 @@ def main():
     # resets for each baseline/policy. The traffic multiplier is simulator
     # generated stress, never presented as CAIDA measurement.
     scenarios = [
-        ("normal", "normal", 1.0, False),
-        ("heavy_congestion", "heavy", args.traffic_scale, False),
-        ("link_failure", "heavy", 1.0, True),
-        ("combined_congestion_failure", "heavy", args.traffic_scale, True),
+        ("normal", "normal", 1.0, False, 0, "normal traffic"),
+        ("moderate_congestion", "heavy", 2.0, False, 0, "2x generated heavy traffic"),
+        ("heavy_congestion", "heavy", args.traffic_scale, False, 0, "configured generated heavy traffic"),
+        ("link_failure", "heavy", 1.0, True, 1, "one active link failed"),
+        ("multiple_link_failures", "heavy", 1.0, True, 2, "two distinct active links failed"),
+        ("combined_congestion_failure", "heavy", args.traffic_scale, True, 1, "configured load plus one link failure"),
     ]
-    methods = ("no_agent", "shortest_path", "congestion_dqn", "failure_dqn", "orchestrated")
-    for scenario, traffic_scenario, traffic_scale, inject_failure in scenarios:
+    methods = ("no_agent", "shortest_path", "congestion_dqn", "failure_dqn",
+               "orchestrated", "orchestrated_no_override")
+    for scenario, traffic_scenario, traffic_scale, inject_failure, failure_count, condition in scenarios:
         for seed in args.seeds:
             for method in methods:
                 rows.append(run_episode(args.topology, scenario, seed, method,
@@ -212,7 +237,8 @@ def main():
                                         inject_failure=inject_failure,
                                         num_demands=args.demands,
                                         traffic_scale=traffic_scale,
-                                        traffic_scenario=traffic_scenario))
+                                        traffic_scenario=traffic_scenario,
+                                        failure_count=failure_count))
     report = {
         "topology": args.topology, "device": str(device), "seeds": args.seeds,
         "demands_per_episode": args.demands,
@@ -220,8 +246,9 @@ def main():
         "checkpoint_learning_updates": {"congestion": congestion.learn_steps, "failure": failure.learn_steps},
         "fresh_process_inference_probe": probe,
         "scenarios": [{"name": name, "traffic_generator_scenario": traffic,
-                       "traffic_scale": scale, "failure_injected": failed}
-                      for name, traffic, scale, failed in scenarios],
+                       "traffic_scale": scale, "failure_injected": failed,
+                       "failure_count": failure_count, "condition": condition}
+                      for name, traffic, scale, failed, failure_count, condition in scenarios],
         "metrics_are_synthetic_network_simulator_outputs": True,
         "runs": rows, "summary": summarize(rows),
         "scenario_summary": summarize_by_scenario(rows),

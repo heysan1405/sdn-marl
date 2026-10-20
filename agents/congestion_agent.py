@@ -29,6 +29,19 @@ class CongestionAgent:
     RATE_LIMIT = 2
 
     NUM_ACTIONS = 3
+    CONGESTION_THRESHOLD = 0.80
+
+    @classmethod
+    def available_actions(cls, state):
+        """Return the simulator-state mask for maintain/reroute/rate-limit.
+
+        Both interventions are enabled only when observed link utilization
+        reaches the simulator's congestion threshold. This prevents an
+        uncongested state from producing needless reroutes or demand cuts.
+        """
+        features = torch.as_tensor(state["edge_features"], dtype=torch.float32)
+        congested = bool(features.numel() and torch.any(features[:, 0] >= cls.CONGESTION_THRESHOLD))
+        return [True, congested, congested]
 
     def __init__(
         self,
@@ -249,10 +262,8 @@ class CongestionAgent:
             training
             and random.random() < self.epsilon
         ):
-
-            return random.randrange(
-                self.NUM_ACTIONS
-            )
+            valid = [i for i, available in enumerate(self.available_actions(state)) if available]
+            return random.choice(valid)
 
         # Save current mode
         was_training_gnn = (
@@ -277,11 +288,8 @@ class CongestionAgent:
                     self.online_network,
                 )
 
-                action = int(
-                    torch.argmax(
-                        q_values[0]
-                    ).item()
-                )
+                mask = torch.as_tensor(self.available_actions(state), device=q_values.device)
+                action = int(q_values[0].masked_fill(~mask, float("-inf")).argmax().item())
 
         finally:
 
@@ -373,8 +381,12 @@ class CongestionAgent:
                         )
                     )
 
+                    next_mask = torch.as_tensor(
+                        self.available_actions(next_state), device=next_q_values.device
+                    )
+
                     next_max_q = (
-                        next_q_values[0].max()
+                        next_q_values[0].masked_fill(~next_mask, float("-inf")).max()
                     )
 
                     target_q = (

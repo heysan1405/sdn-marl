@@ -1,0 +1,60 @@
+{
+  "experiment": "graph-only; topology has no traffic or link-state measurements",
+  "seed": 314,
+  "topology_file": "results\\priority_scale\\caida_1000_seed314.json",
+  "source_graph": {
+    "format": "MatrixMarket coordinate pattern symmetric",
+    "declared_nodes": 190914,
+    "declared_entries": 607610,
+    "parsed_entries": 607610,
+    "unique_undirected_edges": 607610,
+    "duplicate_edge_entries": 0,
+    "self_loops": 0,
+    "connected_components": 1,
+    "source": "tech-RL-caida/tech-RL-caida.mtx"
+  },
+  "nodes": 1000,
+  "edges": 5931,
+  "connected": true,
+  "degree": {
+    "min": 1,
+    "mean": 11.862,
+    "max": 298
+  },
+  "source_destination_pairs": 500,
+  "runtime_seconds": 2.8826387000008253,
+  "max_rss_kib": 289460,
+  "policies": [
+    {
+      "policy": "shortest_path_reference",
+      "pairs": 500,
+      "delivered": 500,
+      "dead_ends": 0,
+      "loops": 0,
+      "unreachable_pairs": 0,
+      "delivery_rate": 1.0,
+      "mean_hops": 3.034,
+      "p50_hops": 3,
+      "p95_hops": 4
+    },
+    {
+      "policy": "distance_constrained",
+      "pairs": 500,
+      "delivered": 500,
+      "dead_ends": 0,
+      "loops": 0,
+      "unreachable_pairs": 0,
+      "delivery_rate": 1.0,
+      "mean_hops": 3.034,
+      "p50_hops": 3,
+      "p95_hops": 4
+    }
+  ],
+  "unsupported_learned_policies": {
+    "baseline_model": "requires measured link features absent from CAIDA",
+    "congestion_dqn": "requires simulator graph state and synthetic demands; not a topology-only policy",
+    "failure_dqn": "requires failure observations; no failures are encoded in CAIDA",
+    "orchestrated": "requires compatible agent observations"
+  },
+  "congestion_metrics": null
+}

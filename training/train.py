@@ -9,12 +9,20 @@ Environment:
     simulator.environment.SDNEnvironment
 """
 
+import argparse
 import csv
+import json
 import os
 import random
+import sys
+import time
+from pathlib import Path
 
 import numpy as np
 import torch
+
+# Support both `python -m training.train` and direct script execution.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.congestion_agent import CongestionAgent
 from agents.failure_agent import FailureAgent
@@ -201,7 +209,7 @@ def validate_state(state):
 # Environment creation
 # ============================================================
 
-def create_environment(topology_name, episode):
+def create_environment(topology_name, episode, traffic_scale=1.0):
     """Create an SDN environment for one training episode."""
 
     topology_path = os.path.join(
@@ -221,6 +229,7 @@ def create_environment(topology_name, episode):
         max_steps=MAX_STEPS_PER_EPISODE,
         k_paths=K_PATHS,
         random_seed=SEED + episode,
+        traffic_scale=traffic_scale,
     )
 
 
@@ -259,6 +268,11 @@ def save_training_history(history, filepath):
                 "congestion_epsilon",
                 "failure_epsilon",
                 "steps",
+                "failure_injected",
+                "congestion_action_0", "congestion_action_1", "congestion_action_2",
+                "failure_action_0", "failure_action_1", "failure_action_2",
+                "congestion_updates_total",
+                "failure_updates_total",
             ]
         )
 
@@ -275,6 +289,11 @@ def save_training_history(history, filepath):
                     row["congestion_epsilon"],
                     row["failure_epsilon"],
                     row["steps"],
+                    row["failure_injected"],
+                    *row["congestion_action_counts"],
+                    *row["failure_action_counts"],
+                    row["congestion_updates"],
+                    row["failure_updates"],
                 ]
             )
 
@@ -284,8 +303,39 @@ def save_training_history(history, filepath):
 # ============================================================
 
 def main():
+    global NUM_EPISODES, MAX_STEPS_PER_EPISODE, NUM_DEMANDS
+    global BATCH_SIZE, CHECKPOINT_DIR, SEED, TRAFFIC_SCENARIO
+
+    parser = argparse.ArgumentParser(description="Train the existing congestion and failure GNN-DQN agents.")
+    parser.add_argument("--episodes", type=int, default=NUM_EPISODES)
+    parser.add_argument("--max-steps", type=int, default=MAX_STEPS_PER_EPISODE)
+    parser.add_argument("--num-demands", type=int, default=NUM_DEMANDS)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--scenario", choices=["normal", "heavy", "single_hotspot", "multiple_hotspots", "traffic_spike", "random"], default=TRAFFIC_SCENARIO)
+    parser.add_argument("--failure-probability", type=float, default=0.5,
+                        help="Per-episode probability of injecting one random link failure.")
+    parser.add_argument("--traffic-scale", type=float, default=1.0,
+                        help="Explicit simulator-generated demand multiplier; useful for stress scenarios.")
+    parser.add_argument("--train-agent", choices=["both", "congestion", "failure"], default="both",
+                        help="Train both DQNs jointly, or isolate one with the other agent held at no-op.")
+    parser.add_argument("--output-dir", default="results/training_dqn_seed42")
+    parser.add_argument("--overwrite", action="store_true", help="Allow replacing files in output-dir.")
+    args = parser.parse_args()
+    if min(args.episodes, args.max_steps, args.num_demands, args.batch_size) < 1:
+        parser.error("episodes, max-steps, num-demands and batch-size must be positive")
+    if not 0.0 <= args.failure_probability <= 1.0:
+        parser.error("failure-probability must be between 0 and 1")
+    if not np.isfinite(args.traffic_scale) or args.traffic_scale <= 0:
+        parser.error("traffic-scale must be a finite positive number")
+    NUM_EPISODES, MAX_STEPS_PER_EPISODE = args.episodes, args.max_steps
+    NUM_DEMANDS, BATCH_SIZE = args.num_demands, args.batch_size
+    SEED, TRAFFIC_SCENARIO, CHECKPOINT_DIR = args.seed, args.scenario, args.output_dir
+    if os.path.isdir(CHECKPOINT_DIR) and os.listdir(CHECKPOINT_DIR) and not args.overwrite:
+        parser.error(f"output directory is not empty: {CHECKPOINT_DIR}; choose a new directory or pass --overwrite")
 
     set_seed(SEED)
+    run_started = time.perf_counter()
 
     # ========================================================
     # Output directory
@@ -295,6 +345,11 @@ def main():
         CHECKPOINT_DIR,
         exist_ok=True,
     )
+    run_config = vars(args).copy()
+    run_config["device"] = str(DEVICE or ("cuda" if torch.cuda.is_available() else "cpu"))
+    run_config["topologies"] = TRAINING_TOPOLOGIES
+    with open(os.path.join(CHECKPOINT_DIR, "config.json"), "w", encoding="utf-8") as config_file:
+        json.dump(run_config, config_file, indent=2)
 
     # ========================================================
     # Congestion Agent
@@ -433,11 +488,25 @@ def main():
         env = create_environment(
             topology_name,
             episode,
+            traffic_scale=args.traffic_scale,
         )
 
         try:
 
             state = env.reset()
+            injected_failure = None
+            if random.Random(SEED + episode * 31).random() < args.failure_probability:
+                link_load = {}
+                for path in env.simulator.active_paths.values():
+                    for u, v in zip(path[:-1], path[1:]):
+                        edge = tuple(sorted((u, v)))
+                        link_load[edge] = link_load.get(edge, 0) + 1
+                if link_load:
+                    max_load = max(link_load.values())
+                    candidates = sorted(edge for edge, load in link_load.items() if load == max_load)
+                    injected_failure = random.Random(SEED + episode * 97).choice(candidates)
+                    env.inject_link_failure(*injected_failure)
+                state = env._build_state()
 
             validate_state(state)
 
@@ -447,6 +516,8 @@ def main():
 
             congestion_losses = []
             failure_losses = []
+            congestion_action_counts = [0, 0, 0]
+            failure_action_counts = [0, 0, 0]
 
             # =================================================
             # Episode loop
@@ -472,14 +543,17 @@ def main():
                         state,
                         training=True,
                     )
-                )
+                ) if args.train_agent in ("both", "congestion") else 0
 
                 failure_action = (
                     failure_agent.select_action(
                         state,
                         training=True,
                     )
-                )
+                ) if args.train_agent in ("both", "failure") else 0
+
+                congestion_action_counts[congestion_action] += 1
+                failure_action_counts[failure_action] += 1
 
                 # ---------------------------------------------
                 # Environment step
@@ -505,37 +579,23 @@ def main():
                 # Store congestion experience
                 # ---------------------------------------------
 
-                congestion_agent.remember(
-                    state,
-                    congestion_action,
-                    reward,
-                    next_state,
-                    done,
-                )
+                if args.train_agent in ("both", "congestion"):
+                    congestion_agent.remember(state, congestion_action, reward, next_state, done)
 
                 # ---------------------------------------------
                 # Store failure experience
                 # ---------------------------------------------
 
-                failure_agent.remember(
-                    state,
-                    failure_action,
-                    reward,
-                    next_state,
-                    done,
-                )
+                if args.train_agent in ("both", "failure"):
+                    failure_agent.remember(state, failure_action, reward, next_state, done)
 
                 # ---------------------------------------------
                 # Learn
                 # ---------------------------------------------
 
-                congestion_loss = (
-                    congestion_agent.learn()
-                )
+                congestion_loss = congestion_agent.learn() if args.train_agent in ("both", "congestion") else None
 
-                failure_loss = (
-                    failure_agent.learn()
-                )
+                failure_loss = failure_agent.learn() if args.train_agent in ("both", "failure") else None
 
                 if congestion_loss is not None:
                     congestion_losses.append(
@@ -599,6 +659,11 @@ def main():
             "failure_epsilon":
                 failure_agent.epsilon,
             "steps": steps,
+            "failure_injected": str(injected_failure) if injected_failure else "",
+            "congestion_action_counts": congestion_action_counts,
+            "failure_action_counts": failure_action_counts,
+            "congestion_updates": congestion_agent.learn_steps,
+            "failure_updates": failure_agent.learn_steps,
         }
 
         history.append(result)
@@ -641,13 +706,10 @@ def main():
                 f"failure_episode_{episode}.pt",
             )
 
-            congestion_agent.save(
-                congestion_path
-            )
-
-            failure_agent.save(
-                failure_path
-            )
+            if args.train_agent in ("both", "congestion"):
+                congestion_agent.save(congestion_path)
+            if args.train_agent in ("both", "failure"):
+                failure_agent.save(failure_path)
 
             print(
                 f"Saved checkpoint at "
@@ -658,23 +720,15 @@ def main():
     # Final models
     # ========================================================
 
-    congestion_final_path = os.path.join(
-        CHECKPOINT_DIR,
-        "congestion_final.pt",
-    )
+    congestion_final_path = os.path.join(CHECKPOINT_DIR, "congestion_dqn_final.pt")
 
-    failure_final_path = os.path.join(
-        CHECKPOINT_DIR,
-        "failure_final.pt",
-    )
+    failure_final_path = os.path.join(CHECKPOINT_DIR, "failure_dqn_final.pt")
 
-    congestion_agent.save(
-        congestion_final_path
-    )
+    if args.train_agent in ("both", "congestion"):
+        congestion_agent.save(congestion_final_path)
 
-    failure_agent.save(
-        failure_final_path
-    )
+    if args.train_agent in ("both", "failure"):
+        failure_agent.save(failure_final_path)
 
     # ========================================================
     # Training history
@@ -690,6 +744,26 @@ def main():
         history_path,
     )
 
+    summary = {
+        "episodes": NUM_EPISODES,
+        "environment_steps": sum(row["steps"] for row in history),
+        "congestion_optimizer_updates": congestion_agent.learn_steps,
+        "failure_optimizer_updates": failure_agent.learn_steps,
+        "mean_episode_reward": sum(row["total_reward"] for row in history) / max(1, len(history)),
+        "training_action_counts": {
+            "congestion": [sum(row["congestion_action_counts"][i] for row in history) for i in range(3)],
+            "failure": [sum(row["failure_action_counts"][i] for row in history) for i in range(3)],
+        },
+        "runtime_seconds": time.perf_counter() - run_started,
+        "trained_agent": args.train_agent,
+        "congestion_checkpoint": congestion_final_path if args.train_agent in ("both", "congestion") else None,
+        "failure_checkpoint": failure_final_path if args.train_agent in ("both", "failure") else None,
+        "config": run_config,
+    }
+    with open(os.path.join(CHECKPOINT_DIR, "training_summary.json"), "w", encoding="utf-8") as summary_file:
+        json.dump(summary, summary_file, indent=2)
+    print(json.dumps(summary, indent=2))
+
     # ========================================================
     # Completion
     # ========================================================
@@ -699,15 +773,10 @@ def main():
     print("TWO-AGENT TRAINING COMPLETE")
     print("=" * 70)
 
-    print(
-        "Congestion model: "
-        f"{congestion_final_path}"
-    )
-
-    print(
-        "Failure model:    "
-        f"{failure_final_path}"
-    )
+    if args.train_agent in ("both", "congestion"):
+        print(f"Congestion model: {congestion_final_path}")
+    if args.train_agent in ("both", "failure"):
+        print(f"Failure model:    {failure_final_path}")
 
     print(
         "Training history: "

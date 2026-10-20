@@ -1,0 +1,17 @@
+{
+  "episodes": 40,
+  "max_steps": 12,
+  "num_demands": 12,
+  "batch_size": 16,
+  "seed": 9152,
+  "scenario": "heavy",
+  "failure_probability": 1.0,
+  "traffic_scale": 1.0,
+  "train_agent": "failure",
+  "output_dir": "results/priority_final_failure_seed9152",
+  "overwrite": false,
+  "device": "cuda",
+  "topologies": [
+    "Abilene.gml"
+  ]
+}

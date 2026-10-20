@@ -96,6 +96,7 @@ class SDNEnvironment:
         k_paths: int = 5,
         random_seed: Optional[int] = 42,
         rate_limit_factor: float = 0.70,
+        traffic_scale: float = 1.0,
     ):
         """
         Parameters
@@ -149,6 +150,7 @@ class SDNEnvironment:
         self.rate_limit_factor = float(
             rate_limit_factor
         )
+        self.traffic_scale = float(traffic_scale)
 
         if self.num_demands <= 0:
             raise ValueError(
@@ -164,6 +166,9 @@ class SDNEnvironment:
             raise ValueError(
                 "rate_limit_factor must be in (0, 1]"
             )
+
+        if not np.isfinite(self.traffic_scale) or self.traffic_scale <= 0:
+            raise ValueError("traffic_scale must be a finite positive number")
 
         if not os.path.isfile(self.topology_path):
             raise FileNotFoundError(
@@ -585,10 +590,10 @@ class SDNEnvironment:
             )
         )
 
-        return [
-            self._normalize_demand(demand)
-            for demand in demands
-        ]
+        normalized = [self._normalize_demand(demand) for demand in demands]
+        for demand in normalized:
+            demand["traffic_mbps"] *= self.traffic_scale
+        return normalized
 
     @staticmethod
     def _normalize_demand(
@@ -690,12 +695,10 @@ class SDNEnvironment:
                 new_rate
             )
 
-            # Reinstall the complete demand set so the
-            # simulator recalculates traffic using the
-            # modified current demand.
-            self.simulator.install_demands(
-                self.demands
-            )
+            # Keep the immutable original demand volume in the simulator for
+            # reward normalization; synchronize the active demand directly.
+            self.simulator.demands[demand_id]["traffic_mbps"] = new_rate
+            self.simulator._apply_all_traffic()
 
             return {
                 "action": "rate-limit",
@@ -743,20 +746,21 @@ class SDNEnvironment:
         # ----------------------------------------------------------
 
         if action == self.FAILURE_REROUTE:
-
-            success = (
-                self.simulator.reroute_demand(
-                    demand_id
-                )
+            # One link failure can break many installed demands at once.
+            # Repair every affected path in this control step; per-demand
+            # repair had delayed full recovery until the end of the episode.
+            changed = self.simulator.reroute_all_demands(
+                congestion_aware=False,
+                require_alternative=False,
             )
 
-            if success:
+            if changed:
                 self._refresh_simulator_state()
 
             return {
                 "action": "reroute",
-                "applied": bool(success),
-                "demand_id": demand_id,
+                "applied": True,
+                "rerouted_demands": int(changed),
             }
 
         # ----------------------------------------------------------
@@ -765,15 +769,18 @@ class SDNEnvironment:
 
         if action == self.FAILURE_ISOLATE:
 
-            result = (
-                self.simulator
-                .isolate_failed_components()
+            result = self.simulator.isolate_failed_components()
+            changed = self.simulator.reroute_all_demands(
+                congestion_aware=False,
+                require_alternative=False,
             )
+            self._refresh_simulator_state()
 
             return {
-                "action": "isolate",
+                "action": "isolate_and_reroute",
                 "applied": True,
                 "result": result,
+                "rerouted_demands": int(changed),
             }
 
         raise ValueError(

@@ -1,0 +1,17 @@
+{
+  "episodes": 40,
+  "max_steps": 12,
+  "num_demands": 12,
+  "batch_size": 16,
+  "seed": 9151,
+  "scenario": "heavy",
+  "failure_probability": 0.0,
+  "traffic_scale": 8.0,
+  "train_agent": "congestion",
+  "output_dir": "results/priority_final_congestion_seed9151",
+  "overwrite": false,
+  "device": "cuda",
+  "topologies": [
+    "Abilene.gml"
+  ]
+}

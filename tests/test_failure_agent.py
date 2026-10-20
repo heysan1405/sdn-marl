@@ -49,6 +49,13 @@ def make_state():
     }
 
 
+def test_failure_action_mask_enables_recovery_only_when_failure_is_observed():
+    state = make_state()
+    assert FailureAgent.available_actions(state) == [True, True, True]
+    state["edge_features"][:, 4] = 0.0
+    assert FailureAgent.available_actions(state) == [True, False, False]
+
+
 def test_failure_action():
 
     agent = FailureAgent(

@@ -1,0 +1,40 @@
+{
+  "episodes": 40,
+  "environment_steps": 480,
+  "congestion_optimizer_updates": 0,
+  "failure_optimizer_updates": 465,
+  "mean_episode_reward": 4.590507096896014,
+  "training_action_counts": {
+    "congestion": [
+      480,
+      0,
+      0
+    ],
+    "failure": [
+      149,
+      155,
+      176
+    ]
+  },
+  "runtime_seconds": 79.2409149999985,
+  "trained_agent": "failure",
+  "congestion_checkpoint": null,
+  "failure_checkpoint": "results/priority_final_failure_seed9152\\failure_dqn_final.pt",
+  "config": {
+    "episodes": 40,
+    "max_steps": 12,
+    "num_demands": 12,
+    "batch_size": 16,
+    "seed": 9152,
+    "scenario": "heavy",
+    "failure_probability": 1.0,
+    "traffic_scale": 1.0,
+    "train_agent": "failure",
+    "output_dir": "results/priority_final_failure_seed9152",
+    "overwrite": false,
+    "device": "cuda",
+    "topologies": [
+      "Abilene.gml"
+    ]
+  }
+}

@@ -30,6 +30,13 @@ class FailureAgent:
 
     NUM_ACTIONS = 3
 
+    @classmethod
+    def available_actions(cls, state):
+        """Keep recovery actions available only when state marks a failure."""
+        features = torch.as_tensor(state["edge_features"], dtype=torch.float32)
+        failed = bool(features.numel() and torch.any(features[:, 4] >= 0.5))
+        return [True, failed, failed]
+
     def __init__(
         self,
         node_feature_dim=7,
@@ -237,10 +244,8 @@ class FailureAgent:
             training
             and random.random() < self.epsilon
         ):
-
-            return random.randrange(
-                self.NUM_ACTIONS
-            )
+            valid = [i for i, available in enumerate(self.available_actions(state)) if available]
+            return random.choice(valid)
 
         # Save current modes
         was_training_gnn = (
@@ -265,11 +270,8 @@ class FailureAgent:
                     self.online_network,
                 )
 
-                action = int(
-                    torch.argmax(
-                        q_values[0]
-                    ).item()
-                )
+                mask = torch.as_tensor(self.available_actions(state), device=q_values.device)
+                action = int(q_values[0].masked_fill(~mask, float("-inf")).argmax().item())
 
         finally:
 
@@ -359,8 +361,12 @@ class FailureAgent:
                         )
                     )
 
+                    next_mask = torch.as_tensor(
+                        self.available_actions(next_state), device=next_q_values.device
+                    )
+
                     next_max_q = (
-                        next_q_values[0].max()
+                        next_q_values[0].masked_fill(~next_mask, float("-inf")).max()
                     )
 
                     target_q = (

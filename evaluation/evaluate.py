@@ -25,6 +25,7 @@ import torch
 
 from agents.congestion_agent import CongestionAgent
 from agents.failure_agent import FailureAgent
+from agents.orchestrator import RuleBasedOrchestrator
 
 from evaluation.metrics import extract_metrics
 
@@ -471,6 +472,7 @@ def evaluate_marl_topology(
     num_episodes=10,
 ):
     """Evaluate trained MARL agents on one topology."""
+    orchestrator = RuleBasedOrchestrator()
 
     topology_path = os.path.join(
         TOPOLOGY_DIR,
@@ -552,6 +554,8 @@ def evaluate_marl_topology(
                 1: 0,
                 2: 0,
             }
+            orchestrator_reasons = {}
+            orchestrator_overrides = 0
 
             total_path_changes = 0
 
@@ -578,13 +582,19 @@ def evaluate_marl_topology(
                     )
                 )
 
-                congestion_action_counts[
-                    congestion_action
-                ] += 1
+                decision = orchestrator.resolve(
+                    state, congestion_action, failure_action
+                )
 
-                failure_action_counts[
-                    failure_action
-                ] += 1
+                if (decision.congestion_action, decision.failure_action) != (
+                    congestion_action, failure_action
+                ):
+                    orchestrator_overrides += 1
+                orchestrator_reasons[decision.reason] = (
+                    orchestrator_reasons.get(decision.reason, 0) + 1
+                )
+                congestion_action_counts[decision.congestion_action] += 1
+                failure_action_counts[decision.failure_action] += 1
 
                 before_paths = get_active_paths(
                     env
@@ -596,9 +606,10 @@ def evaluate_marl_topology(
                     done,
                     info,
                 ) = env.step(
-                    congestion_action,
-                    failure_action,
+                    decision.congestion_action,
+                    decision.failure_action,
                 )
+                info["orchestrator_reason"] = decision.reason
 
                 after_paths = get_active_paths(
                     env
@@ -714,6 +725,8 @@ def evaluate_marl_topology(
                     "failure_isolate": (
                         failure_action_counts[2]
                     ),
+                    "orchestrator_overrides": orchestrator_overrides,
+                    "orchestrator_reasons": str(orchestrator_reasons),
                 }
             )
 

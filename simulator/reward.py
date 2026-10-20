@@ -289,8 +289,8 @@ class RewardCalculator:
 
         requested = float(
             result.get(
-                "total_requested_traffic_mbps",
-                0.0,
+                "total_original_requested_traffic_mbps",
+                result.get("total_requested_traffic_mbps", 0.0),
             )
         )
 

@@ -3,6 +3,20 @@ import torch
 from agents.congestion_agent import CongestionAgent
 
 
+def test_congestion_action_mask_disables_interventions_without_congestion():
+    state = {
+        "edge_features": torch.tensor([[0.79, 1000.0, 1.0, 0.0, 0.0]]),
+    }
+    assert CongestionAgent.available_actions(state) == [True, False, False]
+
+
+def test_congestion_action_mask_enables_interventions_at_threshold():
+    state = {
+        "edge_features": torch.tensor([[0.80, 1000.0, 1.0, 0.0, 0.0]]),
+    }
+    assert CongestionAgent.available_actions(state) == [True, True, True]
+
+
 def make_state():
 
     return {

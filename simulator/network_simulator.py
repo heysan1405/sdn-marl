@@ -817,6 +817,9 @@ class NetworkSimulator:
             )
             for demand in self.demands
         )
+        total_original_requested = sum(
+            float(value) for value in self.original_traffic.values()
+        )
 
         total_link_capacity = sum(
             float(
@@ -848,17 +851,16 @@ class NetworkSimulator:
         path_delays = []
         path_losses = []
 
-        for path in self.active_paths.values():
-
-            delay = self.path_delay(path)
-
-            loss = self.path_packet_loss(path)
-
-            if delay != float("inf"):
-
-                path_delays.append(delay)
-
-            path_losses.append(loss)
+        # Average loss over all requested flows, including flows removed by
+        # isolation. Otherwise an agent can appear to improve loss simply by
+        # deleting the affected demand from active_paths.
+        for demand_id in range(len(self.demands)):
+            path = self.active_paths.get(demand_id)
+            if path is None or not self._path_is_usable(path):
+                path_losses.append(1.0)
+                continue
+            path_delays.append(self.path_delay(path))
+            path_losses.append(self.path_packet_loss(path))
 
         average_delay = (
             sum(path_delays) / len(path_delays)
@@ -874,6 +876,7 @@ class NetworkSimulator:
 
         result = {
             "total_requested_traffic_mbps": total_requested,
+            "total_original_requested_traffic_mbps": total_original_requested,
             "total_throughput_mbps": throughput,
             "total_link_capacity_mbps": total_link_capacity,
             "average_link_utilization": average_utilization,
@@ -883,6 +886,10 @@ class NetworkSimulator:
             "average_packet_loss": average_packet_loss,
             "active_demands": len(self.active_paths),
             "total_demands": len(self.demands),
+            "delivered_demands": sum(
+                1 for demand_id, path in self.active_paths.items()
+                if self._path_is_usable(path)
+            ),
             "failed_links": self.get_failed_links(),
             "failed_nodes": self.get_failed_nodes(),
             "link_statistics": self.get_link_statistics(),
@@ -1441,26 +1448,25 @@ class NetworkSimulator:
         routing layer treats them as unavailable.
         """
 
-        removed_demands = []
+        affected_demands = []
 
         for demand_id, path in list(
             self.active_paths.items()
         ):
 
             if not self._path_is_usable(path):
-
-                removed_demands.append(
-                    demand_id
-                )
-
-                del self.active_paths[demand_id]
+                # Keep the demand/path record so recovery can find and
+                # reroute the affected flow. _apply_all_traffic excludes
+                # unusable paths, so isolation still removes it from links.
+                affected_demands.append(demand_id)
 
         self._apply_all_traffic()
 
         return {
             "isolated_links": self.get_failed_links(),
             "isolated_nodes": self.get_failed_nodes(),
-            "removed_demands": removed_demands,
+            "affected_demands": affected_demands,
+            "removed_demands": [],
         }
 
     # ==============================================================

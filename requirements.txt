@@ -7,3 +7,7 @@ eventlet==0.30.2
 matplotlib
 numpy
 pandas
+
+# Learning agents (GNN/DQN) and graph attention layers
+torch>=2.0
+torch-geometric>=2.5

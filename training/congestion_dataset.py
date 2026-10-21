@@ -1,9 +1,16 @@
 import networkx as nx
 from pathlib import Path
 
-from topology_loader import TopologyLoader
-from dataset_parser import DatasetParser
-from routing_loader import RoutingLoader
+try:
+    from .topology_loader import TopologyLoader
+    from .dataset_parser import DatasetParser
+    from .routing_loader import RoutingLoader
+    from .dataset_schema import candidate_features, link_usage_by_edge
+except ImportError:  # direct script execution from the training directory
+    from topology_loader import TopologyLoader
+    from dataset_parser import DatasetParser
+    from routing_loader import RoutingLoader
+    from dataset_schema import candidate_features, link_usage_by_edge
 
 
 class CongestionDatasetBuilder:
@@ -20,7 +27,8 @@ class CongestionDatasetBuilder:
         split,
         size,
         archive_name,
-        simulation_index=0
+        simulation_index=0,
+        verbose=True,
     ):
 
         # =========================================================
@@ -31,22 +39,29 @@ class CongestionDatasetBuilder:
             split=split,
             size=size,
             archive_name=archive_name,
-            simulation_index=simulation_index
+            simulation_index=simulation_index,
+            verbose=verbose,
         )
 
         simulation = data["simulation"]
 
+        if data["stability"]["status"] != "OK":
+            raise ValueError(
+                f"Simulation {simulation['simulation_id']} is not stable: "
+                f"{data['stability']['status']}"
+            )
+
         graph_file = simulation["graph_file"]
         routing_file = simulation["routing_file"]
 
-        print("=" * 70)
-        print("BUILDING CONGESTION DATASET")
-        print("=" * 70)
-
-        print("Archive :", archive_name)
-        print("Simulation:", simulation_index)
-        print("Graph   :", graph_file)
-        print("Routing :", routing_file)
+        if verbose:
+            print("=" * 70)
+            print("BUILDING CONGESTION DATASET")
+            print("=" * 70)
+            print("Archive :", archive_name)
+            print("Simulation:", simulation_index)
+            print("Graph   :", graph_file)
+            print("Routing :", routing_file)
 
         # =========================================================
         # LOAD TOPOLOGY
@@ -80,43 +95,7 @@ class CongestionDatasetBuilder:
         # BUILD LINK STATE
         # =========================================================
 
-        usage_fields = data["link_usage"]
-
-        valid_usage = [
-            value
-            for value in usage_fields
-            if value is not None
-        ]
-
-        edges = list(graph.edges(data=True))
-
-        if len(edges) != len(valid_usage):
-            raise ValueError(
-                f"Edge/linkUsage mismatch: "
-                f"{len(edges)} edges vs "
-                f"{len(valid_usage)} measurements"
-            )
-
-        link_state = {}
-
-        for edge_index, (source, destination, attributes) in enumerate(edges):
-
-            metrics = valid_usage[edge_index]
-
-            if len(metrics) < 8:
-                continue
-
-            link_state[(source, destination)] = {
-                "bandwidth": float(
-                    attributes.get("bandwidth", 0)
-                ),
-
-                "weight": float(
-                    attributes.get("weight", 0)
-                ),
-
-                "metrics": metrics
-            }
+        link_state = link_usage_by_edge(graph, data["link_usage"])
 
         # =========================================================
         # BUILD CANDIDATE-BASED TRAINING SAMPLES
@@ -154,8 +133,6 @@ class CongestionDatasetBuilder:
                         continue
 
                     state = link_state[edge]
-                    metrics = state["metrics"]
-
                     # -------------------------------------------------
                     # Distance from candidate neighbor to destination.
                     #
@@ -191,22 +168,7 @@ class CongestionDatasetBuilder:
                     # 10 hop distance to destination
                     # -------------------------------------------------
 
-                    features = [
-                        state["bandwidth"],
-                        state["weight"],
-
-                        metrics[0],
-                        metrics[1],
-                        metrics[2],
-
-                        metrics[3],
-                        metrics[4],
-                        metrics[5],
-                        metrics[6],
-                        metrics[7],
-
-                        hop_distance
-                    ]
+                    features = candidate_features(state, hop_distance)
 
                     candidates.append({
                         "neighbor": neighbor,
@@ -249,20 +211,22 @@ class CongestionDatasetBuilder:
         # SUMMARY
         # =========================================================
 
-        print()
-        print("Nodes:", graph.number_of_nodes())
-        print("Edges:", graph.number_of_edges())
-        print("Routes:", len(routes))
-        print("Training decisions:", len(samples))
+        if verbose:
+            print()
+            print("Nodes:", graph.number_of_nodes())
+            print("Edges:", graph.number_of_edges())
+            print("Routes:", len(routes))
+            print("Training decisions:", len(samples))
 
         # =========================================================
         # DISPLAY FIRST 5 SAMPLES
         # =========================================================
 
-        print()
-        print("First 5 candidate-based samples:")
+        if verbose:
+            print()
+            print("First 5 candidate-based samples:")
 
-        for i, sample in enumerate(samples[:5]):
+        for i, sample in enumerate(samples[:5] if verbose else []):
 
             print()
             print(f"Sample {i}")

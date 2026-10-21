@@ -211,7 +211,7 @@ coordination value. See `experiments/phase3/REPORT.md` and `results/phase3_eval/
 for held-out raw rows and statistical outputs.
 
 The dataset tree named `scalability/` contains archived simulator runs in
-`scalability/train/` (25–70-node cases) and `scalability/test/` (50–300-node
+`scalability/train/` (25–50-node cases) and `scalability/test/` (50–300-node
 cases); it is distinct from the CAIDA Matrix Market input in `tech-RL-caida/`.
 Those archive fields were not silently mapped to DQN state features. The Phase
 2 graph-only CAIDA results remain unchanged and no CAIDA QoS claims are made.
@@ -247,4 +247,46 @@ not identify a verified implementation defect to fix or a validated checkpoint
 selection criterion. The orchestrator remains rule-based, and its override
 benefit is unproven. The full test suite after this phase passed 25 tests;
 syntax compilation and `git diff --check` passed.
+
+## Dataset-based supervised training follow-up (2026-10-20)
+
+The `scalability/` dataset has 800 train archives per size for sizes 25, 30,
+35, 40, 45, and 50; test archives cover sizes 50 through 300. Archives include
+input metadata, traffic configuration, row-major link/queue usage, aggregate
+simulation results, stability status, and references to graph/routing files.
+The routing files supply observed next-hop labels. They do not contain
+DQN-chosen actions, action-conditioned transitions/rewards, or failure events,
+so neither DQN was trained offline and no Failure Agent training is supported.
+
+The audit found and corrected a concrete label-feature mapping bug: the old
+builder associated matrix-ordered `linkUsage.txt` measurements with links in
+NetworkX edge iteration order. A shared row-major node-pair mapper now aligns
+the archive fields, and unstable runs are rejected. Tests verify matrix
+mapping and stability parsing. New `training/train_dataset_routing.py` trains
+the existing 11-feature supervised scorer using route-file next-hop labels,
+cross-entropy only, an archive-level train/validation split, and no test data.
+This model is a supervised routing scorer, not a DQN. It was trained for five
+epochs, 10,045 optimizer updates, 251,756 training decisions/epoch, and
+61,952 validation decisions/epoch. Best validation top-1 accuracy was 92.66%.
+Checkpoint: `results/dataset_training_supervised_seed31415/best_validation_model.pt`.
+
+Fresh-process test evaluation covered two one-record archives per size at
+50/100/200/300 nodes and 1,200 sampled OD rollouts. Candidate next-hop accuracy
+was 92.72% over 1,001,736 decisions. The unconstrained scorer delivered 95.67%
+of sampled routes and looped on 52/1,200; destination-specific distance
+constraint delivered all sampled routes without loops. The newly selected paths
+had higher recorded path-congestion features than the existing supervised
+baseline (0.2402 versus 0.2309). These values are snapshots from the archived
+simulations; reroutes were not resimulated and no counterfactual QoS gain is
+claimed. Full details and commands are in `FINAL_EXPERIMENT_REPORT.md`; raw
+training/test records are in `results/dataset_training_supervised_seed31415/`
+and `results/dataset_training_eval_seed31416/`.
+
+Professor dataset-training requirement: partially satisfied for the supervised
+11-feature routing scorer, not satisfied for either DQN. The rule-based
+Orchestrator remains untrained and rule-based.
+
+Verification after this follow-up: 30 tests passed; `compileall`, both new
+CLI help checks, and `git diff --check` completed successfully. PyG emitted
+only third-party annotation deprecation warnings.
 

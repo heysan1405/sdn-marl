@@ -21,3 +21,18 @@ ENV/
 Thumbs.db
 .vscode/
 .idea/
+
+# Generated scalability datasets and routing archives
+/scalability/train/
+/scalability/test/
+
+# Dataset-training experiment outputs
+/results/dataset_training_smoke_seed31415/
+/results/dataset_training_eval_seed31415/
+/results/dataset_training_eval_seed31415_retry/
+/results/dataset_training_eval_seed31416/
+/results/dataset_training_supervised_seed31415/
+
+# Windows metadata and temporary backup files
+**/*:Zone.Identifier
+*.person2

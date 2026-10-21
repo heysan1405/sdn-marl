@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from topology_loader import TopologyLoader
 from dataset_parser import DatasetParser
 from routing_loader import RoutingLoader
+from dataset_schema import candidate_features, link_usage_by_edge
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class CongestionAgent(nn.Module):
@@ -94,26 +97,12 @@ def load_context(split, size, archive_name, simulation_index):
 
     distances = dict(nx.all_pairs_shortest_path_length(graph))
 
-    usage = data["link_usage"]
-    valid_usage = [m for m in usage if m is not None]
-    edges = list(graph.edges(data=True))
-
-    if len(edges) != len(valid_usage):
+    if data["stability"]["status"] != "OK":
         raise ValueError(
-            f"Edge/linkUsage mismatch: {len(edges)} edges, "
-            f"{len(valid_usage)} measurements"
+            f"Simulation {simulation['simulation_id']} is not stable: "
+            f"{data['stability']['status']}"
         )
-
-    link_state = {}
-    for i, (u, v, attrs) in enumerate(edges):
-        metrics = valid_usage[i]
-        if len(metrics) < 8:
-            continue
-        link_state[(u, v)] = {
-            "bandwidth": float(attrs.get("bandwidth", 0)),
-            "weight": float(attrs.get("weight", 0)),
-            "metrics": metrics,
-        }
+    link_state = link_usage_by_edge(graph, data["link_usage"])
 
     print(f"Graph: {simulation['graph_file']}")
     print(f"Routing: {simulation['routing_file']}")
@@ -140,20 +129,7 @@ def make_candidates(graph, distances, link_state, current, destination, enforce_
             continue
 
         metrics = state["metrics"]
-
-        features = [
-            state["bandwidth"],
-            state["weight"],
-            metrics[0],
-            metrics[1],
-            metrics[2],
-            metrics[3],
-            metrics[4],
-            metrics[5],
-            metrics[6],
-            metrics[7],
-            hop_distance,
-        ]
+        features = candidate_features(state, hop_distance)
 
         candidates.append({
             "neighbor": neighbor,

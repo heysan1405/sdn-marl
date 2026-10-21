@@ -211,6 +211,24 @@ class DatasetParser:
             "extra": extra_values
         }
 
+    @staticmethod
+    def parse_stability_field(field):
+        """Parse run status metadata; it is not a transition or reward."""
+        parts = [part.strip() for part in field.strip().split(";")]
+        if len(parts) < 3:
+            raise ValueError(f"Malformed stability row: {field[:100]!r}")
+        try:
+            duration = float(parts[0])
+            intensity = float(parts[1])
+        except ValueError as exc:
+            raise ValueError(f"Malformed stability values: {field[:100]!r}") from exc
+        return {
+            "duration": duration,
+            "intensity": intensity,
+            "status": parts[2],
+            "metadata": parts[3:],
+        }
+
     # =========================================================
     # Parse routing file
     # =========================================================
@@ -252,7 +270,8 @@ class DatasetParser:
         split,
         size,
         archive_name,
-        simulation_index=0
+        simulation_index=0,
+        verbose=True,
     ):
 
         archive_path = self.get_archive(
@@ -261,11 +280,11 @@ class DatasetParser:
             archive_name
         )
 
-        print("=" * 70)
-        print("LOADING SIMULATION")
-        print("=" * 70)
-
-        print("Archive:", archive_path)
+        if verbose:
+            print("=" * 70)
+            print("LOADING SIMULATION")
+            print("=" * 70)
+            print("Archive:", archive_path)
 
         with tarfile.open(
             archive_path,
@@ -296,6 +315,11 @@ class DatasetParser:
                 "simulationResults.txt"
             )
 
+            stability_lines = self.read_file(
+                tar,
+                "stability.txt"
+            )
+
         # -----------------------------------------------------
         # Check simulation index
         # -----------------------------------------------------
@@ -313,6 +337,12 @@ class DatasetParser:
                 f"does not exist. "
                 f"Available simulations: "
                 f"0-{len(input_lines) - 1}"
+            )
+
+        if len(stability_lines) != len(input_lines):
+            raise ValueError(
+                f"stability.txt has {len(stability_lines)} rows for "
+                f"{len(input_lines)} simulation records"
             )
 
         # -----------------------------------------------------
@@ -341,26 +371,19 @@ class DatasetParser:
             simulation_index
         ].split(";")
 
+        stability = self.parse_stability_field(
+            stability_lines[simulation_index]
+        )
+
         # -----------------------------------------------------
         # Check field counts
         # -----------------------------------------------------
 
-        print("\nField counts:")
-
-        print(
-            "Traffic:",
-            len(traffic_fields)
-        )
-
-        print(
-            "Link usage:",
-            len(link_fields)
-        )
-
-        print(
-            "Results:",
-            len(result_fields)
-        )
+        if verbose:
+            print("\nField counts:")
+            print("Traffic:", len(traffic_fields))
+            print("Link usage:", len(link_fields))
+            print("Results:", len(result_fields))
 
         if not (
             len(traffic_fields)
@@ -401,7 +424,8 @@ class DatasetParser:
             "simulation": simulation,
             "traffic": traffic,
             "link_usage": link_usage,
-            "results": results
+            "results": results,
+            "stability": stability,
         }
 
 
